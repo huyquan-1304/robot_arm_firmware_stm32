@@ -1,6 +1,7 @@
 #include "cmd_uart.h"
 #include "zdt_x42s.h"
 #include "joint.h"
+#include "home.h"
 #include "main.h"
 
 /* 0 = khong dung gripper, 1 = co gripper servo tren PA6 (TIM3 CH1) */
@@ -266,6 +267,44 @@ static void cmd_scan(void)
     }
 }
 
+/* Bam phim bat ky tren terminal = huy (dung cho homing va lsw w) */
+static int uart_key_abort(void)
+{
+#if USE_SERVO
+    (void)servo_update();   /* ham nay duoc goi lien tuc trong luc home: cho gripper tiep tuc chay cham */
+#endif
+    if (__HAL_UART_GET_FLAG(&huart1, UART_FLAG_ORE)) { __HAL_UART_CLEAR_OREFLAG(&huart1); }
+    if (__HAL_UART_GET_FLAG(&huart1, UART_FLAG_RXNE)) { (void)huart1.Instance->RDR; return 1; }
+    return 0;
+}
+
+static void print_lsw(void)
+{
+    for (uint8_t n = 1; n <= JOINT_COUNT; n++) {
+        printf("  K%u: %s (chan %s)", n, home_sensor(n) ? "TAC DONG" : "tu do   ", home_pin_level(n) ? "H" : "L");
+        printf(n < JOINT_COUNT ? " |" : "\r\n");
+    }
+}
+
+static void cmd_lsw(int watch)
+{
+    print_lsw();
+    if (!watch) return;
+    printf("Dang theo doi, dua kim loai lai gan tung cam bien. Bam phim bat ky de thoat.\r\n");
+    uint8_t last[JOINT_COUNT];
+    for (uint8_t n = 1; n <= JOINT_COUNT; n++) last[n - 1] = home_sensor(n);
+    while (!uart_key_abort()) {
+        home_sensor_update();
+        uint8_t changed = 0;
+        for (uint8_t n = 1; n <= JOINT_COUNT; n++) {
+            uint8_t s = home_sensor(n);
+            if (s != last[n - 1]) { last[n - 1] = s; changed = 1; }
+        }
+        if (changed) print_lsw();
+    }
+    printf("Thoat theo doi\r\n");
+}
+
 static void cmd_positions(void)
 {
     for (uint8_t n = 1; n <= JOINT_COUNT; n++) {
@@ -274,7 +313,8 @@ static void cmd_positions(void)
         printf("  Khop %u: ", n);
         if (s == JOINT_OK) { print_x10(deg); printf(" do"); }
         else               printf("%s", joint_status_str(s));
-        printf("   (dich "); print_x10(joint_get(n)->target_x10); printf(")\r\n");
+        printf("   (dich "); print_x10(joint_get(n)->target_x10);
+        printf(")%s\r\n", home_is_homed(n) ? "  [da home]" : "  [chua home]");
     }
 }
 
@@ -318,6 +358,12 @@ static void print_help(void)
     printf("  pid <n> md [luu]             tra PID ve mac dinh\r\n");
     printf("                     khong co 'luu' = ghi tam, tat nguon driver la mat\r\n");
     printf("  tune               ghi lai bang thong so da do (tu chay khi khoi dong)\r\n");
+    printf("  lsw                trang thai 4 cam bien hanh trinh\r\n");
+    printf("  lsw w              theo doi cam bien lien tuc (bam phim de thoat)\r\n");
+    printf("  lsj <n> <+|->      chay khop n theo chieu goc tang/giam, tu dung khi cham cam bien\r\n");
+    printf("  hcal <n> [+|-]     do mep cam bien va be rong vung kim loai khop n (KHONG doi goc 0)\r\n");
+    printf("                     +/- = chieu tim (bo trong = theo bang dir trong home.c)\r\n");
+    printf("  home [n]           home khop n, bo trong = tat ca (kem mo gripper). Bam phim bat ky de huy\r\n");
 #if USE_SERVO
     printf("  o / n / u          gripper: mo / kep vat / dong het (chay cham)\r\n");
     printf("  s <us>             gripper: do rong xung 500..2500, s 0 = tha long\r\n");
@@ -437,6 +483,66 @@ static void execute(char *cmd)
     else if (!strcmp(c, "tune")) {
         apply_tuning();
     }
+    else if (!strcmp(c, "lsw")) {
+        cmd_lsw(a1 && !strcmp(a1, "w"));
+    }
+    else if (!strcmp(c, "lsj")) {
+        if (!(n = arg_joint(a1))) return;
+        if (!a2 || (a2[0] != '+' && a2[0] != '-')) { printf("Vi du: lsj 4 -   (chay goc giam toi khi cham cam bien)\r\n"); return; }
+        int32_t deg;
+        printf("Khop %u chay %s toi khi cham cam bien (bam phim bat ky de dung)\r\n", n, a2[0] == '+' ? "goc tang" : "goc giam");
+        home_status_t s = home_jog_to_sensor(n, a2[0] == '+' ? 1 : -1, &deg);
+        if (s == HOME_OK) {
+            printf("Cham cam bien khop %u tai ", n); print_x10(deg);
+            printf(" do  ->  dir = %s1 trong home.c\r\n", a2[0] == '+' ? "+" : "-");
+        } else if (s == HOME_ERR_STUCK_ON) {
+            printf("Cam bien khop %u dang tac dong san. Lui ra truoc (vd: jr %u 5) roi thu lai\r\n", n, n);
+        } else {
+            printf("lsj khop %u: %s\r\n", n, home_status_str(s));
+        }
+    }
+    else if (!strcmp(c, "hcal")) {
+        if (!(n = arg_joint(a1))) return;
+        int32_t deg, band;
+        int8_t  dov = (a2 && a2[0] == '+') ? 1 : (a2 && a2[0] == '-') ? -1 : 0;   /* hcal <n> [+|-] */
+        printf("Do cam bien khop %u%s (bam phim bat ky de huy)\r\n", n,
+               dov > 0 ? ", chieu goc tang" : dov < 0 ? ", chieu goc giam" : ", chieu theo bang");
+        home_status_t s = home_measure(n, dov, &deg, &band);
+        if (s == HOME_OK) {
+            printf("Khop %u: mep gan tai ", n); print_x10(deg);
+            printf(" do (so voi tu the bat nguon), be rong vung kim loai "); print_x10(band);
+            printf(" do\r\n  -> dien ");
+            if (dov) printf("dir = %s1, ", dov > 0 ? "+" : "-");
+            printf("home_x10 = %ld, band_x10 = %ld cho khop %u trong home.c\r\n", (long)deg, (long)band, n);
+        } else if (s == HOME_ERR_STUCK_ON) {
+            printf("Khop %u dang tren cam bien. Dua ve phia binh thuong truoc (vd: jr %u 5 hoac jr %u -5)\r\n", n, n, n);
+        } else {
+            printf("hcal khop %u: %s\r\n", n, home_status_str(s));
+        }
+    }
+    else if (!strcmp(c, "home")) {
+        home_status_t s;
+        if (a1) {
+            if (!(n = arg_joint(a1))) return;
+            s = home_joint(n);
+            printf("Home khop %u: %s\r\n", n, home_status_str(s));
+        } else {
+#if USE_SERVO
+            /* Home ca tay: gripper ha mieng. Bat dau mo ngay, mo dan trong luc cac khop dang home */
+            servo_move_to(GRIP_OPEN_US, GRIP_STEP_US);
+            printf("Gripper: dang mo\r\n");
+#endif
+            s = home_all();
+            printf("Home tat ca: %s\r\n", home_status_str(s));
+#if USE_SERVO
+            /* cho gripper mo het neu home xong truoc (toi da khoang 2 s) */
+            uint32_t t0 = HAL_GetTick();
+            while (servo_get_us() != GRIP_OPEN_US && HAL_GetTick() - t0 < 3000) (void)servo_update();
+            printf("Gripper: da mo (%u us)\r\n", servo_get_us());
+#endif
+        }
+        if (s == HOME_OK) cmd_positions();
+    }
     else if (!strcmp(c, "rig")) {
         cmd_rig(argc, argv);
     }
@@ -474,6 +580,7 @@ static void execute(char *cmd)
 void cmd_uart_init(void)
 {
     line_len = 0;
+    home_init(uart_key_abort);
     print_help();
     cmd_scan();
     apply_tuning();
@@ -486,6 +593,8 @@ void cmd_uart_poll(void)
 #if USE_SERVO
     if (servo_update()) printf("\r\n[Gripper da toi %u us]\r\n> ", servo_get_us());
 #endif
+
+    home_sensor_update();   /* giu bo loc cam bien hanh trinh luon moi */
 
     uint8_t addr = zdt_poll_reached();
     if (addr) printf("\r\n[Khop %u da toi vi tri]\r\n> ", addr);
