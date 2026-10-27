@@ -61,6 +61,16 @@ joint_status_t joint_zero_here(uint8_t n);
 joint_status_t joint_enable(uint8_t n, int on);
 void           joint_stop_all(void);
 
+/* ---- Che do ROS (ros_link.c) ----
+ * Gui 1 diem dich moi chu ky dt_ms (streaming tu Pi, 50 Hz). Toc do lenh cho driver tinh tu
+ * quang duong / dt, nhan he so du 1.3, KHONG vuot dps_x10 cua khop. Neu Pi ra lenh nhanh hon
+ * dps_x10 thi khop di cham hon lenh, controller tren Pi se bao loi vi khong toi dich dung han.
+ * Tra ve JOINT_ERR_LIMIT (khong gui) neu goc ngoai gioi han. */
+joint_status_t joint_stream(uint8_t n, int32_t deg_x10, uint32_t dt_ms);
+
+/* Dat dich hien tai cua khop (dung khi vua bat: dich = vi tri thuc) */
+joint_status_t joint_set_target(uint8_t n, int32_t deg_x10);
+
 /* Du phong cho cong tac hanh trinh, chua lam */
 joint_status_t joint_home(uint8_t n);
 

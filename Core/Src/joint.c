@@ -6,11 +6,13 @@
  * Toc do / gia toc tinh tai DAU RA khop. Khop 2 tai nang nen de cham va gia toc nho.
  * Quy doi sang dong co: RPM = (do/giay) * ti_so / 6   (vi 1 RPM = 6 do/giay)
  *
+ * Goc 0 cua moi khop = giua cam bien hanh trinh (home.c). Khop 2, 3: S_PosTDP = Disable tren driver.
+ *
  *  Khop | Ti so | Gioi han (do) | Toc do khop | Gia toc khop | -> Dong co
- *   1   |  4    |  -90 .. +90   |  30 do/s    |  60 do/s2    |  20 RPM
- *   2   |  27   |    0 .. 90    |  15 do/s    |  15 do/s2    |  67.5 RPM
- *   3   |  14   |    0 .. 90    |  20 do/s    |  30 do/s2    |  46.7 RPM
- *   4   |  1    |    0 .. 90    |  45 do/s    |  90 do/s2    |  7.5 RPM
+ *   1   |  12   |  -90 .. +90   |  80 do/s    | 120 do/s2    | 160 RPM
+ *   2   |  27   |  -90 .. +90   |   8 do/s    |  10 do/s2    |  36 RPM
+ *   3   |  14   |  -90 .. +90   |  25 do/s    |  35 do/s2    |  58 RPM
+ *   4   |  1    |  -90 .. +90   |  80 do/s    | 200 do/s2    |  13 RPM
  */
 static joint_t joints[JOINT_COUNT] = {
     /* addr ratio dir   min    max   dps_x10 acc_x10 offset target */
@@ -152,6 +154,54 @@ joint_status_t joint_move_all(const int32_t deg_x10[JOINT_COUNT])
         for (int i = 0; i < JOINT_COUNT; i++) joints[i].target_x10 = deg_x10[i];
     }
     return drv(s);
+}
+
+/* He so gia toc khi streaming: gia toc lenh cho driver = acc_x10 cua khop x he so nay.
+ * Moi chu ky driver nhan dich moi, gia toc qua nho thi khop khong kip bam theo. */
+#ifndef JOINT_STREAM_ACC_GAIN
+#define JOINT_STREAM_ACC_GAIN 4.0f
+#endif
+
+joint_status_t joint_stream(uint8_t n, int32_t deg_x10, uint32_t dt_ms)
+{
+    joint_t *j = joint_get(n);
+    if (!j) return JOINT_ERR_ARG;
+    if (deg_x10 < j->min_x10 || deg_x10 > j->max_x10) return JOINT_ERR_LIMIT;
+
+    int32_t diff = deg_x10 - j->target_x10;
+    if (diff == 0) return JOINT_OK;              /* dich khong doi, khong ton bus CAN */
+    if (dt_ms < 5u) dt_ms = 5u;
+
+    float dist = (float)((diff < 0) ? -diff : diff) / 10.0f;   /* do */
+    float vmax = j->dps_x10 / 10.0f;
+    float v    = dist / ((float)dt_ms / 1000.0f) * 1.3f;
+    if (v > vmax) v = vmax;
+    if (v < 0.5f) v = 0.5f;
+    float a = (j->acc_x10 / 10.0f) * JOINT_STREAM_ACC_GAIN;
+
+    /* LAM TRON LEN (khong lam tron gan nhat): don vi toc do cua ZDT la 0.1 RPM truc dong co.
+     * Khop ti so nho (khop 4 = 1:1) thi 0.1 RPM = 0.6 do/s tai khop, lam tron xuong se lam
+     * khop cham hon lenh va tre dan so voi cac khop khac. Lam tron len thi khop toi diem dich
+     * cua chu ky som hon mot chut roi dung cho, khong bao gio tre. */
+    float rpm_x10 = v * (float)j->ratio / 6.0f * 10.0f;
+    float acc_rpm = a * (float)j->ratio / 6.0f;
+    uint16_t rpm_cmd = (uint16_t)(rpm_x10 > 30000.0f ? 30000.0f : rpm_x10 + 0.999f);
+    uint16_t acc_cmd = (uint16_t)(acc_rpm > 65535.0f ? 65535.0f : acc_rpm + 0.999f);
+    if (rpm_cmd < 1) rpm_cmd = 1;
+    if (acc_cmd < 1) acc_cmd = 1;
+
+    zdt_status_t s = zdt_move(j->addr, joint_to_motor(j, deg_x10),
+                              rpm_cmd, acc_cmd, acc_cmd, ZDT_MOVE_ABSOLUTE);
+    if (s == ZDT_OK) j->target_x10 = deg_x10;
+    return drv(s);
+}
+
+joint_status_t joint_set_target(uint8_t n, int32_t deg_x10)
+{
+    joint_t *j = joint_get(n);
+    if (!j) return JOINT_ERR_ARG;
+    j->target_x10 = deg_x10;
+    return JOINT_OK;
 }
 
 joint_status_t joint_read(uint8_t n, int32_t *deg_x10)

@@ -1,5 +1,8 @@
 #include "cmd_uart.h"
+#include "uart_rx.h"
+#include "ros_link.h"
 #include "zdt_x42s.h"
+#include "bsp_can.h"
 #include "joint.h"
 #include "home.h"
 #include "main.h"
@@ -267,15 +270,19 @@ static void cmd_scan(void)
     }
 }
 
-/* Bam phim bat ky tren terminal = huy (dung cho homing va lsw w) */
+/* Ham "huy" truyen cho home.c, duoc goi lien tuc trong luc home va trong lsw w.
+ *   Console : bam phim bat ky = huy. Byte lay tu bo dem ngat (uart_rx.c), KHONG doc RDR truc tiep
+ *             (ngat da lay byte, doc RDR o day se khong bao gio thay phim bam).
+ *   Che do ROS (home do Pi yeu cau): chi huy khi nhan CMD_ESTOP. Goi PING / CMD_JOINT tu Pi van
+ *             duoc xu ly binh thuong, khong bi coi la "bam phim". */
 static int uart_key_abort(void)
 {
 #if USE_SERVO
-    (void)servo_update();   /* ham nay duoc goi lien tuc trong luc home: cho gripper tiep tuc chay cham */
+    (void)servo_update();   /* cho gripper tiep tuc chay cham trong luc home */
 #endif
-    if (__HAL_UART_GET_FLAG(&huart1, UART_FLAG_ORE)) { __HAL_UART_CLEAR_OREFLAG(&huart1); }
-    if (__HAL_UART_GET_FLAG(&huart1, UART_FLAG_RXNE)) { (void)huart1.Instance->RDR; return 1; }
-    return 0;
+    if (ros_link_active()) return ros_link_poll_blocking();
+    uint8_t b;
+    return uart_rx_get(&b);
 }
 
 static void print_lsw(void)
@@ -351,6 +358,8 @@ static void print_help(void)
     printf("  i <n> / f <n>      trang thai he thong / cau hinh driver n\r\n");
     printf("  k <n>              kiem tra encoder va hieu chuan driver n\r\n");
     printf("  b                  bat/tat in frame CAN\r\n");
+    printf("  can [r]            bo dem loi CAN, so lan bus-off (r = xoa)\r\n");
+    printf("  canstress [giay] [fum]  thu tai CAN; f=doc co, u=gui UART, m=khop 4 +-5 do (mo phong ROS)\r\n");
     printf("  rig <n> [gt|md] [luu]        doc / ghi he so cung (md: fw204 384, fw206 1560)\r\n");
     printf("  pid <n>                      doc PID driver\r\n");
     printf("  pid <n> v <KpTD> [KiTD] [luu]  chi doi vong toc do\r\n");
@@ -372,6 +381,25 @@ static void print_help(void)
 }
 
 /* ------------------------------------------------------------------ */
+
+/* Home ca tay: gripper ha mieng (mo dan trong luc cac khop dang home), roi home 4 khop.
+ * Dung chung cho lenh "home" va CMD_HOME tu Pi (o che do ROS moi printf bi bo qua). */
+home_status_t cmd_home_all(void)
+{
+#if USE_SERVO
+    servo_move_to(GRIP_OPEN_US, GRIP_STEP_US);
+    printf("Gripper: dang mo\r\n");
+#endif
+    home_status_t s = home_all();
+    printf("Home tat ca: %s\r\n", home_status_str(s));
+#if USE_SERVO
+    /* cho gripper mo het neu home xong truoc (toi da khoang 3 s) */
+    uint32_t t0 = HAL_GetTick();
+    while (servo_get_us() != GRIP_OPEN_US && HAL_GetTick() - t0 < 3000) (void)servo_update();
+    printf("Gripper: da mo (%u us)\r\n", servo_get_us());
+#endif
+    return s;
+}
 
 static void execute(char *cmd)
 {
@@ -527,19 +555,7 @@ static void execute(char *cmd)
             s = home_joint(n);
             printf("Home khop %u: %s\r\n", n, home_status_str(s));
         } else {
-#if USE_SERVO
-            /* Home ca tay: gripper ha mieng. Bat dau mo ngay, mo dan trong luc cac khop dang home */
-            servo_move_to(GRIP_OPEN_US, GRIP_STEP_US);
-            printf("Gripper: dang mo\r\n");
-#endif
-            s = home_all();
-            printf("Home tat ca: %s\r\n", home_status_str(s));
-#if USE_SERVO
-            /* cho gripper mo het neu home xong truoc (toi da khoang 2 s) */
-            uint32_t t0 = HAL_GetTick();
-            while (servo_get_us() != GRIP_OPEN_US && HAL_GetTick() - t0 < 3000) (void)servo_update();
-            printf("Gripper: da mo (%u us)\r\n", servo_get_us());
-#endif
+            s = cmd_home_all();
         }
         if (s == HOME_OK) cmd_positions();
     }
@@ -552,6 +568,91 @@ static void execute(char *cmd)
     else if (!strcmp(c, "b")) {
         zdt_debug = !zdt_debug;
         printf("In frame CAN: %s\r\n", zdt_debug ? "BAT" : "TAT");
+    }
+    else if (!strcmp(c, "canstress")) {
+        /* Thu tai bus CAN o che do console, khong qua ROS.
+         *   canstress [giay]          doc vi tri 4 khop nhanh nhat co the
+         *   canstress [giay] [f][u][m] mo phong tung phan cua chu ky ROS 20 ms:
+         *       f = doc co trang thai 1 khop / chu ky (nhu ros_link)
+         *       u = gui 29 byte qua UART moi chu ky (nhu goi STATE gui Pi)
+         *       m = khop 4 chay qua lai +-5 do bang joint_stream (nhu lenh tu Pi)
+         * Them dan tung chu de tim phan nao gay loi CAN. */
+        uint32_t sec = a1 ? (uint32_t)atoi(a1) : 20u;
+        if (sec == 0u || sec > 300u) sec = 20u;
+        const char *opt = a2 ? a2 : "";
+        uint8_t o_f = (strchr(opt, 'f') != NULL), o_u = (strchr(opt, 'u') != NULL), o_m = (strchr(opt, 'm') != NULL);
+        uint8_t ros_like = (uint8_t)(o_f || o_u || o_m);
+        printf("canstress %lu s, che do %s%s%s%s (bam phim bat ky de dung)\r\n", (unsigned long)sec,
+               ros_like ? "chu ky 20 ms:" : "doc lien tuc", o_f ? " +co" : "", o_u ? " +UART" : "", o_m ? " +khop4" : "");
+        int32_t base4 = 0;
+        if (o_m) {
+            (void)joint_enable(4, 1);
+            if (joint_read(4, &base4) != JOINT_OK) { printf("Khong doc duoc khop 4\r\n"); return; }
+            joint_set_target(4, base4);
+        }
+        static const uint8_t junk[29] = {0};
+        bsp_can_clear_diag();
+        uint32_t t0 = HAL_GetTick(), ok = 0, fail = 0, last_print = t0, next = t0, k = 0;
+        uint8_t key, rr = 0, stop = 0;
+        while (uart_rx_get(&key)) { }     /* bo ky tu xuong dong con sot cua lenh vua go */
+        while (!stop && HAL_GetTick() - t0 < sec * 1000u) {
+            if (ros_like) {
+                while ((int32_t)(HAL_GetTick() - next) < 0) {
+                    if (uart_rx_get(&key) && key != '\r' && key != '\n') { stop = 1; break; }
+                }
+                if (stop) break;
+                next += 20u;
+                if (o_m) {                /* song tam giac +-5 do, chu ky 2 s */
+                    uint32_t ph = k % 100u;
+                    int32_t tri = (int32_t)(ph < 50u ? ph : 100u - ph);
+                    if (joint_stream(4, base4 - 50 + tri * 2, 20u) != JOINT_OK) fail++;
+                    k++;
+                }
+            }
+            for (uint8_t n = 1; n <= JOINT_COUNT; n++) {
+                int32_t v;
+                if (joint_read(n, &v) == JOINT_OK) ok++; else fail++;
+            }
+            if (o_f) {
+                uint8_t fl;
+                joint_t *j = joint_get((uint8_t)(rr + 1u));
+                if (j && zdt_read_flags(j->addr, &fl) != ZDT_OK) fail++;
+                rr = (uint8_t)((rr + 1u) % JOINT_COUNT);
+                (void)zdt_poll_reached();
+            }
+            if (o_u) (void)HAL_UART_Transmit(&huart1, (uint8_t *)junk, sizeof junk, 10);
+            if (HAL_GetTick() - last_print >= 2000u) {
+                last_print = HAL_GetTick();
+                bsp_can_diag_t d; bsp_can_get_diag(&d);
+                printf("  %lu s: doc OK %lu, loi %lu, bus-off %lu\r\n",
+                       (unsigned long)((last_print - t0) / 1000u), (unsigned long)ok,
+                       (unsigned long)fail, (unsigned long)d.busoff_count);
+            }
+            if (!ros_like && uart_rx_get(&key) && key != '\r' && key != '\n') break;
+        }
+        if (o_m) (void)joint_stream(4, base4, 200u);   /* tra khop 4 ve cho cu */
+        uint32_t ms = HAL_GetTick() - t0;
+        bsp_can_diag_t d;
+        bsp_can_get_diag(&d);
+        printf("Ket qua: %lu lan doc trong %lu ms (%lu lan/s), loi %lu\r\n",
+               (unsigned long)(ok + fail), (unsigned long)ms,
+               (unsigned long)(ms ? (ok + fail) * 1000u / ms : 0u), (unsigned long)fail);
+        printf("CAN: TEC %u  REC %u | bus-off %lu lan | tong loi %lu\r\n",
+               d.tec, d.rec, (unsigned long)d.busoff_count, (unsigned long)d.err_total);
+        printf("  loai loi: stuff %lu, form %lu, ACK %lu, bit1 %lu, bit0 %lu, CRC %lu\r\n",
+               (unsigned long)d.lec[1], (unsigned long)d.lec[2], (unsigned long)d.lec[3],
+               (unsigned long)d.lec[4], (unsigned long)d.lec[5], (unsigned long)d.lec[6]);
+    }
+    else if (!strcmp(c, "can")) {
+        if (a1 && !strcmp(a1, "r")) { bsp_can_clear_diag(); printf("Da xoa bo dem loi CAN\r\n"); return; }
+        bsp_can_diag_t d;
+        bsp_can_get_diag(&d);
+        printf("CAN: TEC %u  REC %u  %s | bus-off %lu lan | tong loi %lu\r\n",
+               d.tec, d.rec, d.busoff_now ? "BUS-OFF" : (d.passive ? "error-passive" : "binh thuong"),
+               (unsigned long)d.busoff_count, (unsigned long)d.err_total);
+        printf("  loai loi: stuff %lu, form %lu, ACK %lu, bit1 %lu, bit0 %lu, CRC %lu\r\n",
+               (unsigned long)d.lec[1], (unsigned long)d.lec[2], (unsigned long)d.lec[3],
+               (unsigned long)d.lec[4], (unsigned long)d.lec[5], (unsigned long)d.lec[6]);
     }
 #if USE_SERVO
     else if (!strcmp(c, "o")) {
@@ -590,6 +691,13 @@ void cmd_uart_init(void)
 
 void cmd_uart_poll(void)
 {
+    /* CHE DO ROS: chi chuyen byte cho ros_link, khong printf (se lam hong goi nhi phan) */
+    if (ros_link_active()) {
+        uint8_t b;
+        while (uart_rx_get(&b)) (void)ros_link_feed(b);
+        return;
+    }
+
 #if USE_SERVO
     if (servo_update()) printf("\r\n[Gripper da toi %u us]\r\n> ", servo_get_us());
 #endif
@@ -599,10 +707,14 @@ void cmd_uart_poll(void)
     uint8_t addr = zdt_poll_reached();
     if (addr) printf("\r\n[Khop %u da toi vi tri]\r\n> ", addr);
 
-    if (__HAL_UART_GET_FLAG(&huart1, UART_FLAG_ORE)) { __HAL_UART_CLEAR_OREFLAG(&huart1); }
-
-    while (__HAL_UART_GET_FLAG(&huart1, UART_FLAG_RXNE)) {
-        char ch = (char)(huart1.Instance->RDR & 0xFF);
+    /* Byte nhan bang ngat (uart_rx.c), khong doc RDR truc tiep nua */
+    uint8_t b;
+    while (uart_rx_get(&b)) {
+        if (ros_link_feed(b)) {                 /* byte cua goi nhi phan tu Pi */
+            if (ros_link_active()) return;      /* vua vao che do ROS */
+            continue;
+        }
+        char ch = (char)b;
 
         if (ch == '\r' || ch == '\n') {
             if (line_len > 0) {
