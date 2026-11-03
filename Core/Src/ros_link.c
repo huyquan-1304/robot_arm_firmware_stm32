@@ -1,9 +1,11 @@
 #include "ros_link.h"
 #include "joint.h"
 #include "home.h"
+#include "wrist.h"
 #include "zdt_x42s.h"
 #include "cmd_uart.h"
 #include "uart_rx.h"
+#include "link.h"
 #include "main.h"
 #include <stdio.h>
 #include <string.h>
@@ -32,9 +34,11 @@ extern UART_HandleTypeDef huart1;   /* do CubeMX tao trong main.c */
 #define T_CMD_SET_ZERO 0x04u
 #define T_CMD_PING     0x05u
 #define T_CMD_HOME     0x06u
+#define T_CMD_WRIST    0x07u   /* khop 5: int16 goc 0.1 do (little endian), gui khi goc thay doi */
 #define T_STATE        0x81u
 
 #define LEN_CMD_JOINT  20u
+#define LEN_CMD_WRIST  2u
 #define LEN_STATE      23u
 #define MAX_PAYLOAD    32u
 
@@ -96,7 +100,7 @@ static void send_frame(uint8_t type, const uint8_t *payload, uint8_t len)
     f[0] = HDR0; f[1] = HDR1; f[2] = type; f[3] = len;
     if (len) memcpy(&f[4], payload, len);
     put_u16(&f[4 + len], crc16_ccitt(&f[2], (uint16_t)(2u + len), 0xFFFFu));
-    HAL_UART_Transmit(&huart1, f, (uint16_t)(6u + len), 10);
+    link_ros_write(f, (uint16_t)(6u + len));   /* USB hoac UART, tuy duong Pi dang dung */
 }
 
 static void send_state(uint8_t loop_ms)
@@ -118,6 +122,7 @@ static void send_state(uint8_t loop_ms)
 static void stop_motion(void)
 {
     joint_stop_all();     /* lenh FE: dung ngay, dong co van giu luc */
+    wrist_stop();         /* khop 5 dung tai goc hien tai */
     enabled = 0;
 }
 
@@ -199,6 +204,7 @@ static void handle_frame(uint8_t type, const uint8_t *p, uint8_t len)
     last_rx_tick = HAL_GetTick();
     if (!active) {
         active = 1;
+        link_ros_bind();                   /* ROS chay tren duong vua nhan goi nay (USB hoac UART) */
         zdt_debug = 0;                     /* khong in frame CAN ra UART nua */
         enabled = 0;
         last_cycle_tick = HAL_GetTick();
@@ -228,6 +234,13 @@ static void handle_frame(uint8_t type, const uint8_t *p, uint8_t len)
         break;
     case T_CMD_HOME:
         if (!enabled && !homing) home_req = 1;   /* chay trong ros_link_task, khong chay trong bo tach khung */
+        break;
+    case T_CMD_WRIST:
+        /* Chi nhan khi da home va dang enable: tranh servo nhay luc tay chua o tu the an toan */
+        if (len == LEN_CMD_WRIST && enabled && !homing && !(status & ROS_ST_NOT_HOMED)) {
+            int16_t w = (int16_t)get_u16(&p[0]);
+            if (!wrist_move_x10(w)) status |= ROS_ST_LIMIT;
+        }
         break;
     case T_CMD_PING:
     default:
@@ -299,7 +312,8 @@ uint8_t ros_link_active(void)
 int ros_link_poll_blocking(void)
 {
     uint8_t b;
-    while (uart_rx_get(&b)) (void)ros_link_feed(b);   /* PING giu last_rx_tick, ESTOP dat home_abort */
+    link_task();                                        /* day goi STATE ra USB trong luc home */
+    while (link_get_ros(&b)) (void)ros_link_feed(b);    /* PING giu last_rx_tick, ESTOP dat home_abort */
     uint32_t now = HAL_GetTick();
     if (now - last_home_state_tick >= 100u) {
         last_home_state_tick = now;

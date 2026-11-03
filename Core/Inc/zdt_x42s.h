@@ -114,4 +114,25 @@ zdt_status_t zdt_write_stiffness(uint8_t addr, uint32_t v, uint8_t store);
  * Tra ve dia chi driver vua bao toi noi, 0 neu khong co. Moi lan goi tra ve 1 driver. */
 uint8_t zdt_poll_reached(void);
 
+/* ===================== HOME BANG DRIVER =====================
+ * Cam bien noi vao chan En cua driver, menu P_Pul = ESI_RCO. Chan En xuong 0 V = cam bien tac dong. */
+#define ZDT_HOME_MODE_ENDSTOP  0x03u      /* "多圈限位开关回零": chay toi khi chan En = 0 V */
+#define ZDT_HOME_BUSY          0x04u      /* co 3B: Org_SF, dang home */
+#define ZDT_HOME_FAIL          0x08u      /* co 3B: Org_CF, home that bai (het thoi gian cho) */
+#define ZDT_IO_EN_PIN          0x01u      /* co 3D: muc chan En */
+
+/* Doc muc cac chan IO (lenh 3D) */
+zdt_status_t zdt_read_io(uint8_t addr, uint8_t *io);
+
+/* Dat thong so home (lenh 4C AE). ccw = 0: CW, 1: CCW. rpm: toc do home tai truc dong co (0..3000).
+ * timeout_ms: driver tu dung va bao that bai neu qua thoi gian. store = 0: khong luu vinh vien */
+zdt_status_t zdt_home_set_params(uint8_t addr, uint8_t mode, uint8_t ccw, uint16_t rpm,
+                                 uint32_t timeout_ms, uint8_t store);
+
+/* Bat dau home (lenh 9A). *reply = 0x02 (bat dau), 0x12 / 0x22 (cam bien dang tac dong, dung yen) */
+zdt_status_t zdt_home_trigger(uint8_t addr, uint8_t mode, uint8_t *reply);
+
+/* Dung home dang chay (lenh 9C 48) */
+zdt_status_t zdt_home_abort(uint8_t addr);
+
 #endif /* ZDT_X42S_H */

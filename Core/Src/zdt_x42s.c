@@ -397,3 +397,66 @@ uint8_t zdt_poll_reached(void)
     }
     return 0;
 }
+
+/* ===================== HOME BANG DRIVER (manual 3.2.4, 5.4, 5.5.17) ===================== */
+
+/* manual 5.5.17: gui 3D 6B, tra ve 3D | muc IO | 6B. bit0 = muc chan En (0 thap, 1 cao) */
+zdt_status_t zdt_read_io(uint8_t addr, uint8_t *io)
+{
+    uint8_t d[8], n;
+    zdt_status_t s = zdt_cmd_read(addr, 0x3D, d, &n);
+    if (s != ZDT_OK) return s;
+    if (n < 2) return ZDT_ERR_OTHER;
+    *io = d[1];
+    return ZDT_OK;
+}
+
+/* manual 5.4.6: 4C AE | luu | che do | chieu | toc do(2) | thoi gian cho(4) |
+ *               toc do/dong/thoi gian phat hien va cham (2+2+2) | O_POT_En | 6B = 19 byte, 3 frame.
+ * Ba thong so va cham chi dung cho che do 02, o day giu gia tri mac dinh 300 RPM / 800 mA / 60 ms.
+ * O_POT_En = 0: driver KHONG tu home khi bat nguon (STM32 ra lenh theo thu tu 4, 3, 2, 1). */
+zdt_status_t zdt_home_set_params(uint8_t addr, uint8_t mode, uint8_t ccw, uint16_t rpm,
+                                 uint32_t timeout_ms, uint8_t store)
+{
+    uint8_t cmd[19] = {
+        0x4C, 0xAE, (uint8_t)(store ? 1 : 0), mode, (uint8_t)(ccw ? 1 : 0),
+        (uint8_t)(rpm >> 8), (uint8_t)rpm,
+        (uint8_t)(timeout_ms >> 24), (uint8_t)(timeout_ms >> 16),
+        (uint8_t)(timeout_ms >> 8),  (uint8_t)timeout_ms,
+        0x01, 0x2C,      /* 300 RPM */
+        0x03, 0x20,      /* 800 mA  */
+        0x00, 0x3C,      /* 60 ms   */
+        0x00,            /* O_POT_En = 0 */
+        ZDT_CHECKSUM
+    };
+    return zdt_cmd_ack(addr, cmd, sizeof cmd);
+}
+
+/* manual 5.4.2: 9A | che do | dong bo 00 | 6B.
+ * Tra loi: 02 = bat dau home, 12/22 = dang o diem 0 hoac cam bien dang tac dong (dong co dung yen).
+ * *reply nhan byte tra loi de ham goi phan biet 02 voi 12/22. */
+zdt_status_t zdt_home_trigger(uint8_t addr, uint8_t mode, uint8_t *reply)
+{
+    uint8_t cmd[4] = { 0x9A, mode, 0x00, ZDT_CHECKSUM };
+    zdt_drain();
+    zdt_status_t s = zdt_send(addr, cmd, 4);
+    if (s != ZDT_OK) return s;
+
+    uint8_t d[8], n;
+    s = zdt_wait(addr, 0x9A, d, &n);      /* zdt_wait bo qua "9A 9F 6B" (bao home xong) */
+    if (s != ZDT_OK) return s;
+    *reply = d[1];
+    switch (d[1]) {
+    case 0x02: case 0x12: case 0x22: return ZDT_OK;
+    case 0xE2: return ZDT_ERR_PARAM;
+    case 0xEE: return ZDT_ERR_FORMAT;
+    default:   return ZDT_ERR_OTHER;
+    }
+}
+
+/* manual 5.4.3: 9C 48 6B, dung home dang chay */
+zdt_status_t zdt_home_abort(uint8_t addr)
+{
+    uint8_t cmd[3] = { 0x9C, 0x48, ZDT_CHECKSUM };
+    return zdt_cmd_ack(addr, cmd, 3);
+}

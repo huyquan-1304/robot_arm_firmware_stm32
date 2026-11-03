@@ -3,135 +3,114 @@
 #include "main.h"
 #include <stdio.h>
 
-/* ===================== BANG CAU HINH HOMING =====================
- *   act      : 1 = muc cao tren chan GPIO nghia la tac dong, 0 = muc thap (qua module opto PC817 la 0)
- *   en       : 0 = chua cho phep "home" (van dung duoc "hcal", "lsj"). Dat 1 sau khi da co home_x10
- *   dir      : chieu goc khop di TOI cam bien tu tu the goc (+1 = goc tang, -1 = goc giam). Do bang "lsj"
- *   home_x10 : goc khop (0.1 do) tai MEP GAN cua vung kim loai (mep gap khi di theo chieu dir). Do bang "hcal"
- *   band_x10 : be rong vung kim loai (0.1 do). Do bang "hcal". Dung khi cham tu phia ben kia.
- *              0 = chua do: van home duoc nhung neu cham tu phia ben kia thi goc lech toi be rong vung kim loai
- *   fast     : toc do tim (0.1 do/s)
- *   slow     : toc do nhich ra khi luc bat dau dang dung tren kim loai (0.1 do/s)
- *   travel   : tim theo chieu dir toi da bay nhieu, tinh tu cho bat dau (0.1 do)
+/* ===================== BANG CAU HINH HOME BANG DRIVER =====================
+ *   en       : 0 = khong cho home khop nay
+ *   dir      : chieu goc khop di TOI cam bien tu tu the lam viec (+1 goc tang, -1 goc giam). Kiem tra bang "lsj"
+ *   cw_pos   : +1 = lenh CW cua driver lam vi tri dong co TANG, -1 = GIAM, 0 = CHUA DO. Do bang "hcw <n>"
+ *   home_x10 : goc khop (0.1 do) tai cho DRIVER DUNG khi home theo chieu dir, tinh tu GIUA vung kim loai.
+ *              Do bang "hcal <n>". Xap xi = -dir * band / 2
+ *   band_x10 : be rong vung kim loai (0.1 do). Do bang "hcal <n>"
+ *   rpm      : toc do home cua driver, tinh tai TRUC DONG CO (RPM). Toc do khop = rpm * 6 / ti_so (do/s)
+ *   fast     : toc do STM32 tim cam bien (0.1 do/s tai khop), dung khi HOME_USE_DRIVER = 0
+ *   slow     : toc do STM32 nhich cham (0.1 do/s tai khop): ra khoi cam bien, do be rong, vao giua
+ *   travel   : quang tim theo chieu dir toi da (0.1 do tai khop)
  *   rev      : khong thay thi tim nguoc toi da bay nhieu, tinh tu cho bat dau (0.1 do). 0 = khong tim nguoc
- *
- * Quy trinh home: GAP CAM BIEN LA DUNG NGAY, khong lui, khong tiep can lai.
- * Toc do tinh tai DAU RA khop.
  */
 typedef struct {
-    GPIO_TypeDef *port;
-    uint16_t      pin;
-    uint8_t       act_high;
-    uint8_t       enabled;
-    int8_t        dir;
-    int32_t       home_x10;
-    uint16_t      band_x10;
-    uint16_t      fast_dps_x10;
-    uint16_t      slow_dps_x10;
-    uint16_t      travel_x10;
-    uint16_t      rev_x10;
+    uint8_t  enabled;
+    int8_t   dir;
+    int8_t   cw_pos;
+    int32_t  home_x10;
+    uint16_t band_x10;
+    uint16_t rpm;
+    uint16_t fast_dps_x10;
+    uint16_t slow_dps_x10;
+    uint16_t travel_x10;
+    uint16_t rev_x10;
 } home_cfg_t;
 
-/* Chan cam bien: lay tu CubeMX (nhan LSW1..LSW4 trong .ioc, sinh ra trong main.h).
- * Neu .ioc chua khai bao thi dung PB12..PB15 va code tu cau hinh trong home_init(). */
-#if defined(LSW1_Pin) && defined(LSW2_Pin) && defined(LSW3_Pin) && defined(LSW4_Pin)
-  #define LSW_FROM_CUBEMX 1
-  #define LSW1 LSW1_GPIO_Port, LSW1_Pin
-  #define LSW2 LSW2_GPIO_Port, LSW2_Pin
-  #define LSW3 LSW3_GPIO_Port, LSW3_Pin
-  #define LSW4 LSW4_GPIO_Port, LSW4_Pin
-#else
-  #define LSW_FROM_CUBEMX 0
-  #define LSW1 GPIOB, GPIO_PIN_12
-  #define LSW2 GPIOB, GPIO_PIN_13
-  #define LSW3 GPIOB, GPIO_PIN_14
-  #define LSW4 GPIOB, GPIO_PIN_15
-#endif
-
 static const home_cfg_t cfg[JOINT_COUNT] = {
-    /* home_x10 TAM tinh: khop 1, 4 tu lsj. Khop 2, 3 = so lsj cu x 0.9 (truoc khi tat S_PosTDP).
-     * band_x10 = 0: CHUA DO. Chay "hcal <n>" de lay ca home_x10 va band_x10. */
-    /* fast = toc do tim, de THAP de luc cham dung ngay ma khong giat ca tay
-     * (nang luong phai trieu tieu khi dung ty le binh phuong toc do). */
-    /* GOC 0 = GIUA VUNG KIM LOAI CUA MOI CAM BIEN (tu the 4 den opto deu sang) = home trong MoveIt.
-     * Vi vay home_x10 = -dir * band / 2 (mep gan cach giua nua be rong).
-     * dir, band: do bang hcal ngay 2026-10-24. Cam bien khop 3 o PB11. */
-    /* port, pin act en dir home_x10 band fast slow travel rev */
-    { LSW1,      0,  1, +1,   -33,   66,   80,  30,  400,  400 },   /* khop 1: tim 8 do/s */
-    { LSW2,      0,  1, -1,    32,   64,   30,  20,  500,  100 },   /* khop 2: tim 3 do/s, lam viec phia goc duong nen rev nho */
-    { LSW3,      0,  1, +1,   -33,   66,   80,  30,  500,  300 },   /* khop 3: tim 8 do/s */
-    { LSW4,      0,  1, +1,   -50,  101,  100,  50,  400,  400 },   /* khop 4: tim 10 do/s */
+    /* dir, band: giu tu lan do hcal 2026-10-24. home_x10 TAM = -dir * band / 2, PHAI DO LAI bang hcal.
+     * cw_pos = 0: CHUA DO, chay "hcw <n>" truoc. */
+    /* home_x10 = -dir * band / 2: mep gan cach giua vung kim loai nua be rong (so do hcal 2026-10-24) */
+    /* en dir cw  home_x10 band rpm fast slow travel rev */
+    {  1, +1,  0,    -33,   66,  16,  80,  30,  400,  400 },   /* khop 1: tim 8 do/s   */
+    {  1, -1,  0,     27,   53,  14,  30,  20,  500,  100 },   /* khop 2: tim 3 do/s   */
+    {  1, +1,  0,    -33,   66,  19,  80,  30,  500,  300 },   /* khop 3: tim 8 do/s   */
+    {  1, +1,  0,    -50,  101,   2, 100,  50,  400,  400 },   /* khop 4: tim 10 do/s  */
 };
 
-/* Thu tu home tat ca: tu ngon tay vao goc (gap co tay, khuyu, vai roi moi xoay de)
- * de luc khop 1 xoay thi canh tay da thu gon. Doi lai neu co khi cua ban khac. */
+/* Cach home:
+ *   0 = MAC DINH. Menu driver: O_Mode = Nearest (KHONG de EndStop: EndStop lam lenh 3D doc sai chan En).
+ *   2 = DRIVER TU HOME THEO THONG SO TREN MENU. STM32 chi gui lenh 9A, KHONG gui 4C.
+ *       Menu tung driver: O_Mode = EndStop, O_Dir = chieu TOI cam bien, O_Vel = 30, O_POT_En = Disable.
+ *       Cot rpm trong bang = O_Vel tren menu (chi dung de tinh thoi gian cho). Khong can hcw, khong doc 3D.
+ *   1 = driver home, STM32 gui thong so qua 4C (can cw_pos). Driver khong chay o 16 RPM.
+ *   0 = STM32 tu tim, doc chan En qua lenh 3D. Lenh 3D doc khong tin cay tren driver nay. */
+#define HOME_MODE         0
+#define HOME_USE_DRIVER   (HOME_MODE == 1)
+
+/* Thu tu home tat ca: tu co tay vao goc, de luc khop 1 xoay thi canh tay da thu gon */
 static const uint8_t HOME_ORDER[JOINT_COUNT] = { 4, 3, 2, 1 };
 
+#define EN_ACTIVE_LOW     1      /* chan En = 0 V nghia la cam bien tac dong (driver cung hieu nhu vay) */
 #define BAND_MAX_X10      200    /* be rong toi da cho phep cua vung kim loai (0.1 do) */
-#define DEBOUNCE_SAMPLES  3      /* so mau 1 ms lien tiep giong nhau moi doi trang thai */
-#define STALL_SKIP_MS     2000   /* bo qua kiem tra ket trong luc tang toc */
-#define STALL_WINDOW_MS   500    /* cua so kiem tra ket */
-#define STOP_ACC_RPM_S    1000   /* gia toc dung khi cham cam bien (RPM/s tai truc dong co) */
-#define HOME_SPEED_ACC    300    /* gia toc toi thieu (RPM/s) khi chay che do toc do luc home */
+#define EXIT_MARGIN_X10   20     /* ra khoi cam bien roi lui them 2 do truoc khi home */
+#define POLL_MS           30     /* chu ky doc co home cua driver */
+#define STALL_SKIP_MS     2000
+#define STALL_WINDOW_MS   500
+#define STOP_ACC_RPM_S    1000
+#define HOME_SPEED_ACC    300
 
 /* ------------------------------------------------------------------ */
 
 static home_abort_fn abort_cb = 0;
-static uint8_t  stable[JOINT_COUNT], cnt[JOINT_COUNT], homed[JOINT_COUNT];
-static uint32_t last_tick;
-
-static uint8_t raw_active(uint8_t i)
-{
-    uint8_t high = (HAL_GPIO_ReadPin(cfg[i].port, cfg[i].pin) == GPIO_PIN_SET);
-    return cfg[i].act_high ? high : !high;
-}
-
-void home_sensor_update(void)
-{
-    uint32_t t = HAL_GetTick();
-    if (t == last_tick) return;
-    last_tick = t;
-    for (uint8_t i = 0; i < JOINT_COUNT; i++) {
-        uint8_t r = raw_active(i);
-        if (r != stable[i]) {
-            if (++cnt[i] >= DEBOUNCE_SAMPLES) { stable[i] = r; cnt[i] = 0; }
-        } else {
-            cnt[i] = 0;
-        }
-    }
-}
+static uint8_t homed[JOINT_COUNT];
 
 void home_init(home_abort_fn abort_fn)
 {
     abort_cb = abort_fn;
-#if !LSW_FROM_CUBEMX
-    /* .ioc chua khai bao chan: tu cau hinh. Neu da khai bao, MX_GPIO_Init() trong main.c lam viec nay */
-    __HAL_RCC_GPIOB_CLK_ENABLE();
-    GPIO_InitTypeDef g = {0};
-    g.Mode  = GPIO_MODE_INPUT;
-    g.Pull  = GPIO_PULLUP;
-    g.Speed = GPIO_SPEED_FREQ_LOW;
-    for (uint8_t i = 0; i < JOINT_COUNT; i++) {
-        g.Pin = cfg[i].pin;
-        HAL_GPIO_Init(cfg[i].port, &g);
+    for (uint8_t i = 0; i < JOINT_COUNT; i++) homed[i] = 0;
+}
+
+void home_sensor_update(void) { }
+
+/* Doc 1 lan muc chan En. Tra ve 1 neu doc duoc */
+static int read_en(uint8_t n, uint8_t *level)
+{
+    uint8_t io;
+    if (zdt_read_io(joint_get(n)->addr, &io) != ZDT_OK) return 0;
+    *level = (io & ZDT_IO_EN_PIN) ? 1 : 0;   /* bit 3D = muc chan En (ban test luc 23:27: luc bat nguon bao tu do) */
+    return 1;
+}
+
+static uint8_t level_to_active(uint8_t level) { return EN_ACTIVE_LOW ? !level : level; }
+
+/* Doc trang thai cam bien 2 lan cach 2 ms, 2 lan giong nhau moi tin. *act = 1 tac dong */
+static int read_sensor(uint8_t n, uint8_t *act)
+{
+    uint8_t a, b;
+    for (uint8_t k = 0; k < 3; k++) {
+        if (!read_en(n, &a)) return 0;
+        HAL_Delay(2);
+        if (!read_en(n, &b)) return 0;
+        if (a == b) { *act = level_to_active(a); return 1; }
     }
-#endif
-    HAL_Delay(2);
-    for (uint8_t i = 0; i < JOINT_COUNT; i++) { stable[i] = raw_active(i); cnt[i] = 0; homed[i] = 0; }
-    last_tick = HAL_GetTick();
+    return 0;
 }
 
 uint8_t home_sensor(uint8_t n)
 {
+    uint8_t act;
     if (n < 1 || n > JOINT_COUNT) return 0;
-    home_sensor_update();
-    return stable[n - 1];
+    return read_sensor(n, &act) ? act : 0;
 }
 
 uint8_t home_pin_level(uint8_t n)
 {
+    uint8_t lv;
     if (n < 1 || n > JOINT_COUNT) return 0;
-    return HAL_GPIO_ReadPin(cfg[n - 1].port, cfg[n - 1].pin) == GPIO_PIN_SET;
+    return read_en(n, &lv) ? lv : 0;
 }
 
 uint8_t home_is_homed(uint8_t n)
@@ -144,13 +123,13 @@ const char *home_status_str(home_status_t s)
     switch (s) {
     case HOME_OK:             return "OK";
     case HOME_ERR_ARG:        return "so khop sai";
-    case HOME_ERR_NOT_CONFIG: return "khop chua bat home (en = 0 trong home.c)";
-    case HOME_ERR_DRIVER:     return "driver khong tra loi / tu choi lenh";
-    case HOME_ERR_NOT_FOUND:  return "het quang duong ma khong thay cam bien (sai chieu? tang travel?)";
-    case HOME_ERR_STUCK_ON:   return "cam bien luon tac dong (dut day? sai cuc tinh? vung kim loai qua rong?)";
+    case HOME_ERR_NOT_CONFIG: return "khop chua cau hinh (en = 0, hoac cw_pos = 0: chay hcw)";
+    case HOME_ERR_DRIVER:     return "driver khong tra loi / tu choi lenh (kiem tra P_Pul = ESI_RCO)";
+    case HOME_ERR_NOT_FOUND:  return "het quang duong ma khong thay cam bien (sai chieu? sai cw_pos? dut day cam bien NO?)";
+    case HOME_ERR_STUCK_ON:   return "cam bien luon tac dong (cam bien NC noi thang vao En? dut day? lap sai?)";
     case HOME_ERR_STALL:      return "dong co khong nhuc nhich (ket co khi?)";
     case HOME_ERR_TIMEOUT:    return "qua thoi gian";
-    case HOME_ERR_ABORT:      return "da huy bang phim";
+    case HOME_ERR_ABORT:      return "da huy";
     default:                  return "loi khac";
     }
 }
@@ -158,7 +137,6 @@ const char *home_status_str(home_status_t s)
 /* ------------------------------------------------------------------ */
 
 static int user_abort(void) { return abort_cb ? abort_cb() : 0; }
-
 static int32_t iabs(int32_t v) { return v < 0 ? -v : v; }
 
 static int32_t div_round(int32_t a, int32_t b)
@@ -166,7 +144,6 @@ static int32_t div_round(int32_t a, int32_t b)
     return (a >= 0) ? (a + b / 2) / b : -((-a + b / 2) / b);
 }
 
-/* 0.1 do/s cua khop -> 0.1 RPM cua dong co:  dps_x10/10 * ratio / 6 * 10 */
 static int32_t rpm_x10_of(const joint_t *j, uint16_t dps_x10)
 {
     int32_t v = ((int32_t)dps_x10 * j->ratio + 3) / 6;
@@ -175,7 +152,6 @@ static int32_t rpm_x10_of(const joint_t *j, uint16_t dps_x10)
     return v;
 }
 
-/* gia toc cua khop (0.1 do/s2) -> RPM/s cua dong co, khong nho hon HOME_SPEED_ACC */
 static uint16_t acc_of(const joint_t *j)
 {
     int32_t a = ((int32_t)j->acc_x10 * j->ratio + 30) / 60;
@@ -184,18 +160,15 @@ static uint16_t acc_of(const joint_t *j)
     return (uint16_t)a;
 }
 
-/* goc khop (0.1 do) tu vi tri dong co (0.1 do) theo offset hien tai */
 static int32_t joint_of(const joint_t *j, int32_t m)
 {
     return div_round((m - j->offset_x10) * j->dir, (int32_t)j->ratio);
 }
 
-/* Cho ms mili giay, van cap nhat cam bien. Tra ve 0 neu bi huy */
 static int wait_ms(uint32_t ms)
 {
     uint32_t t0 = HAL_GetTick();
     while (HAL_GetTick() - t0 < ms) {
-        home_sensor_update();
         if (user_abort()) return 0;
     }
     return 1;
@@ -203,98 +176,64 @@ static int wait_ms(uint32_t ms)
 
 static void stop_joint(const joint_t *j)
 {
-    /* Lenh toc do 0 voi gia toc lon de dung ngay, sau do lenh dung FE 98 cho chac */
     (void)zdt_speed(j->addr, 0, STOP_ACC_RPM_S);
     (void)zdt_stop(j->addr);
     HAL_Delay(150);
 }
 
-/* Chay che do toc do theo chieu GOC KHOP joint_dir (+1 tang, -1 giam).
- * DUNG NGAY khi cam bien == want. *m_hit = vi tri dong co (0.1 do) doc ngay luc dat dieu kien.
- * Gioi han quang duong max_x10 (goc khop, 0.1 do), kiem tra ket, bam phim de huy. */
+/* STM32 tu chay che do toc do, doc cam bien qua CAN, DUNG khi cam bien == want.
+ * Chi dung cho doan cham (ra khoi cam bien, do be rong, lsj). */
 static home_status_t seek_dir(uint8_t n, int8_t joint_dir, uint16_t dps_x10, uint8_t want,
                               uint32_t max_x10, int32_t *m_hit)
 {
     joint_t *j = joint_get(n);
-    int32_t m0, m, m_win;
+    int32_t m0, m, m_win, m_first = 0;
+    uint8_t lv, hits = 0;
 
     if (zdt_read_position(j->addr, &m0) != ZDT_OK) return HOME_ERR_DRIVER;
 
     int32_t  limit_m  = (int32_t)max_x10 * j->ratio;
-    int32_t  expect_m = (int32_t)dps_x10 * j->ratio * STALL_WINDOW_MS / 1000 / 4;   /* 25% quang duong ky vong */
+    int32_t  expect_m = (int32_t)dps_x10 * j->ratio * STALL_WINDOW_MS / 1000 / 4;
     uint32_t timeout  = (uint32_t)max_x10 * 1000u / dps_x10 * 2u + 3000u;
     int32_t  v        = rpm_x10_of(j, dps_x10) * j->dir * joint_dir;
 
     if (zdt_speed(j->addr, v, acc_of(j)) != ZDT_OK) return HOME_ERR_DRIVER;
 
-    uint32_t t0 = HAL_GetTick(), t_pos = t0, t_win = t0;
+    uint32_t t0 = HAL_GetTick(), t_win = t0;
     m_win = m0;
 
     for (;;) {
-        home_sensor_update();
-        if (stable[n - 1] == want) {
-            zdt_status_t s = zdt_read_position(j->addr, &m);   /* doc truoc khi dung de lay dung diem cham */
+        if (zdt_read_position(j->addr, &m) != ZDT_OK || !read_en(n, &lv)) {
             stop_joint(j);
-            if (s != ZDT_OK) return HOME_ERR_DRIVER;
-            *m_hit = m;
-            return HOME_OK;
+            return HOME_ERR_DRIVER;
+        }
+        if (level_to_active(lv) == want) {
+            if (hits == 0) m_first = m;          /* lay vi tri o lan doc dau tien thay doi */
+            if (++hits >= 2) {
+                stop_joint(j);
+                *m_hit = m_first;
+                return HOME_OK;
+            }
+        } else {
+            hits = 0;
         }
         if (user_abort()) { stop_joint(j); return HOME_ERR_ABORT; }
 
         uint32_t now = HAL_GetTick();
         if (now - t0 > timeout) { stop_joint(j); return HOME_ERR_TIMEOUT; }
-
-        if (now - t_pos >= 20) {
-            t_pos = now;
-            if (zdt_read_position(j->addr, &m) != ZDT_OK) { stop_joint(j); return HOME_ERR_DRIVER; }
-            if (iabs(m - m0) > limit_m) {
-                stop_joint(j);
-                return want ? HOME_ERR_NOT_FOUND : HOME_ERR_STUCK_ON;
-            }
-            if (now - t0 > STALL_SKIP_MS && now - t_win >= STALL_WINDOW_MS) {
-                if (iabs(m - m_win) < expect_m) { stop_joint(j); return HOME_ERR_STALL; }
-                m_win = m;
-                t_win = now;
-            }
+        if (iabs(m - m0) > limit_m) {
+            stop_joint(j);
+            return want ? HOME_ERR_NOT_FOUND : HOME_ERR_STUCK_ON;
+        }
+        if (now - t0 > STALL_SKIP_MS && now - t_win >= STALL_WINDOW_MS) {
+            if (iabs(m - m_win) < expect_m) { stop_joint(j); return HOME_ERR_STALL; }
+            m_win = m;
+            t_win = now;
         }
     }
 }
 
-/* Tim cam bien, dung ngay khi gap. Tra ve vi tri dong co luc gap va mep nao:
- *   *far = 0: gap mep gan (dung chieu dir, hoac luc dau dang dung tren kim loai roi nhich ra)
- *   *far = 1: gap mep xa (tim nguoc, tu phia ben kia toi) */
-static home_status_t find_edge(uint8_t n, int32_t *m_hit, uint8_t *far)
-{
-    const home_cfg_t *c = &cfg[n - 1];
-    home_status_t st;
-
-    if (!wait_ms(DEBOUNCE_SAMPLES + 2)) return HOME_ERR_ABORT;   /* lam moi bo loc truoc khi xet */
-
-    /* Dang dung tren kim loai: nhich CHAM nguoc chieu dir toi khi cam bien vua nha = mep gan */
-    if (home_sensor(n)) {
-        printf("  Dang tren cam bien, nhich ra mep...\r\n");
-        uint32_t lim = c->band_x10 ? (uint32_t)c->band_x10 + 50u : BAND_MAX_X10;
-        st = seek_dir(n, (int8_t)-c->dir, c->slow_dps_x10, 0, lim, m_hit);
-        *far = 0;
-        return st;
-    }
-
-    /* Tim theo chieu dir */
-    printf("  Tim (toi da %lu do)...\r\n", (unsigned long)(c->travel_x10 / 10));
-    st = seek_dir(n, c->dir, c->fast_dps_x10, 1, c->travel_x10, m_hit);
-    *far = 0;
-    if (st != HOME_ERR_NOT_FOUND || c->rev_x10 == 0) return st;
-
-    /* Khong thay: tim nguoc. Tinh tu cuoi chieu dir: quay ve qua cho bat dau roi di them toi da rev */
-    printf("  Khong thay, tim chieu nguoc (toi da %lu do tinh tu cho bat dau)...\r\n",
-           (unsigned long)(c->rev_x10 / 10));
-    st = seek_dir(n, (int8_t)-c->dir, c->fast_dps_x10, 1, (uint32_t)c->travel_x10 + c->rev_x10, m_hit);
-    *far = 1;
-    return st;
-}
-
-/* Chay khop toi goc khop joint_x10 (vi tri tuyet doi theo offset hien tai), KHONG kiem tra gioi han
- * trong joint.c (diem giua cam bien co the nam ngoai gioi han lam viec). Cho toi noi. */
+/* Chay khop toi goc joint_x10 theo offset hien tai, khong kiem tra gioi han joint.c, cho toi noi */
 static home_status_t move_to(uint8_t n, int32_t joint_x10, uint16_t dps_x10)
 {
     joint_t *j = joint_get(n);
@@ -304,9 +243,9 @@ static home_status_t move_to(uint8_t n, int32_t joint_x10, uint16_t dps_x10)
     if (zdt_move(j->addr, mt, (uint16_t)rpm_x10_of(j, dps_x10), acc_of(j), acc_of(j),
                  ZDT_MOVE_ABSOLUTE) != ZDT_OK) return HOME_ERR_DRIVER;
 
-    int32_t  tol     = (int32_t)j->ratio * 3;              /* 0.3 do tai khop */
+    int32_t  tol     = (int32_t)j->ratio * 3;
     if (tol < 10) tol = 10;
-    uint32_t dist    = (uint32_t)iabs(mt - m0) / j->ratio;  /* 0.1 do tai khop */
+    uint32_t dist    = (uint32_t)iabs(mt - m0) / j->ratio;
     uint32_t timeout = dist * 1000u / dps_x10 * 2u + 3000u;
     uint32_t t0 = HAL_GetTick();
     while (HAL_GetTick() - t0 < timeout) {
@@ -318,7 +257,100 @@ static home_status_t move_to(uint8_t n, int32_t joint_x10, uint16_t dps_x10)
     return HOME_ERR_TIMEOUT;
 }
 
+/* Dang dung tren cam bien: nhich cham nguoc chieu dir toi khi nha, roi lui them EXIT_MARGIN */
+static home_status_t leave_sensor(uint8_t n, int8_t dir)
+{
+    const home_cfg_t *c = &cfg[n - 1];
+    joint_t *j = joint_get(n);
+    uint8_t act;
+    int32_t m;
+
+    if (!read_sensor(n, &act)) return HOME_ERR_DRIVER;
+    if (!act) return HOME_OK;
+
+    printf("  Dang tren cam bien, nhich ra...\r\n");
+    uint32_t lim = c->band_x10 ? (uint32_t)c->band_x10 + 50u : BAND_MAX_X10;
+    home_status_t st = seek_dir(n, (int8_t)-dir, c->slow_dps_x10, 0, lim, &m);
+    if (st != HOME_OK) return st;
+    return move_to(n, joint_of(j, m) - (int32_t)dir * EXIT_MARGIN_X10, c->slow_dps_x10);
+}
+
+/* Cho driver home theo chieu joint_dir, gioi han max_x10. *m_stop = vi tri dong co luc driver dung */
+static home_status_t driver_home(uint8_t n, int8_t joint_dir, uint32_t max_x10, int32_t *m_stop)
+{
+    const home_cfg_t *c = &cfg[n - 1];
+    joint_t *j = joint_get(n);
+    int32_t  m0, m;
+    uint8_t  reply, f, seen_busy = 0;
+
+    /* chieu dong co can quay = dir cua joint.c x chieu khop. Doi ra CW/CCW theo cw_pos */
+    int8_t  motor_sign = (int8_t)(j->dir * joint_dir);
+    uint8_t ccw        = (motor_sign == c->cw_pos) ? 0 : 1;
+
+    /* thoi gian = quang duong tai truc dong co / toc do, nhan 1.5 cong 2 s */
+    uint32_t t_need  = (uint32_t)max_x10 * j->ratio * 100u / ((uint32_t)c->rpm * 6u);    /* ms */
+    uint32_t drv_tmo = t_need * 3u / 2u + 2000u;
+
+    if (zdt_read_position(j->addr, &m0) != ZDT_OK) return HOME_ERR_DRIVER;
+    if (zdt_home_set_params(j->addr, ZDT_HOME_MODE_ENDSTOP, ccw, c->rpm, drv_tmo, 0) != ZDT_OK)
+        return HOME_ERR_DRIVER;
+    if (zdt_home_trigger(j->addr, ZDT_HOME_MODE_ENDSTOP, &reply) != ZDT_OK) return HOME_ERR_DRIVER;
+    if (reply == 0x12 || reply == 0x22) return HOME_ERR_STUCK_ON;
+
+    uint32_t t0 = HAL_GetTick();
+    int32_t  limit_m = (int32_t)(max_x10 + 50u) * j->ratio;   /* STM32 tu chan them neu driver chay qua */
+
+    for (;;) {
+        if (!wait_ms(POLL_MS)) { (void)zdt_home_abort(j->addr); stop_joint(j); return HOME_ERR_ABORT; }
+        if (zdt_read_home_flags(j->addr, &f) != ZDT_OK) { (void)zdt_home_abort(j->addr); return HOME_ERR_DRIVER; }
+        if (zdt_read_position(j->addr, &m) != ZDT_OK)   { (void)zdt_home_abort(j->addr); return HOME_ERR_DRIVER; }
+
+        if (f & ZDT_HOME_BUSY) seen_busy = 1;
+        uint32_t el = HAL_GetTick() - t0;
+
+        if (iabs(m - m0) > limit_m) { (void)zdt_home_abort(j->addr); stop_joint(j); return HOME_ERR_NOT_FOUND; }
+        if (el > drv_tmo + 2000u)   { (void)zdt_home_abort(j->addr); stop_joint(j); return HOME_ERR_TIMEOUT; }
+
+        if (!(f & ZDT_HOME_BUSY) && (seen_busy || el > 300u)) {
+            if (f & ZDT_HOME_FAIL) return HOME_ERR_NOT_FOUND;
+            HAL_Delay(100);                                  /* cho dong co dung han roi doc lai */
+            if (zdt_read_position(j->addr, &m) != ZDT_OK) return HOME_ERR_DRIVER;
+            *m_stop = m;
+            return HOME_OK;
+        }
+    }
+}
+
 /* ------------------------------------------------------------------ */
+
+home_status_t home_probe_cw(uint8_t n, int8_t *cw_pos)
+{
+    joint_t *j = joint_get(n);
+    if (!j) return HOME_ERR_ARG;
+    const home_cfg_t *c = &cfg[n - 1];
+    int32_t m0, m1;
+    uint8_t act, reply;
+
+    if (!read_sensor(n, &act)) return HOME_ERR_DRIVER;
+    if (act) return HOME_ERR_STUCK_ON;
+
+    if (zdt_read_position(j->addr, &m0) != ZDT_OK) return HOME_ERR_DRIVER;
+    if (zdt_home_set_params(j->addr, ZDT_HOME_MODE_ENDSTOP, 0, c->rpm, 3000, 0) != ZDT_OK) return HOME_ERR_DRIVER;
+    if (zdt_home_trigger(j->addr, ZDT_HOME_MODE_ENDSTOP, &reply) != ZDT_OK) return HOME_ERR_DRIVER;
+    if (reply == 0x12 || reply == 0x22) return HOME_ERR_STUCK_ON;
+
+    int ok = wait_ms(500);
+    (void)zdt_home_abort(j->addr);
+    stop_joint(j);
+    if (!ok) return HOME_ERR_ABORT;
+    if (zdt_read_position(j->addr, &m1) != ZDT_OK) return HOME_ERR_DRIVER;
+
+    int32_t d = m1 - m0;
+    if (iabs(d) < 5) return HOME_ERR_STALL;          /* duoi 0.5 do tai truc dong co */
+    *cw_pos = (d > 0) ? 1 : -1;
+    j->target_x10 = joint_of(j, m1);
+    return HOME_OK;
+}
 
 home_status_t home_jog_to_sensor(uint8_t n, int8_t joint_dir, int32_t *joint_x10)
 {
@@ -326,52 +358,114 @@ home_status_t home_jog_to_sensor(uint8_t n, int8_t joint_dir, int32_t *joint_x10
     if (!j || (joint_dir != 1 && joint_dir != -1)) return HOME_ERR_ARG;
     const home_cfg_t *c = &cfg[n - 1];
     int32_t m_hit;
+    uint8_t act;
 
-    if (!wait_ms(DEBOUNCE_SAMPLES + 2)) return HOME_ERR_ABORT;
-    if (home_sensor(n)) return HOME_ERR_STUCK_ON;            /* dang tac dong san: khong biet di dau */
+    if (!read_sensor(n, &act)) return HOME_ERR_DRIVER;
+    if (act) return HOME_ERR_STUCK_ON;
 
-    home_status_t st = seek_dir(n, joint_dir, c->fast_dps_x10, 1, c->travel_x10, &m_hit);
+    uint16_t v = (uint16_t)((uint32_t)c->rpm * 60u / j->ratio);   /* toc do khop tuong duong, 0.1 do/s */
+    if (v < 10) v = 10;
+    home_status_t st = seek_dir(n, joint_dir, v, 1, c->travel_x10, &m_hit);
     if (st != HOME_OK) return st;
     *joint_x10 = joint_of(j, m_hit);
     j->target_x10 = *joint_x10;
     return HOME_OK;
 }
 
-/* Do mep gan (home_x10) va be rong vung kim loai (band_x10) theo goc 0 HIEN TAI. Khong doi offset.
- * Can khop dang o phia tu the goc cua cam bien (phia binh thuong). 3 doan chay ngan:
- *   1. di theo dir toi khi gap mep gan
- *   2. di tiep theo dir toi khi ra khoi vung kim loai
- *   3. quay nguoc toi khi gap mep xa (tu phia ben kia) */
+/* hcal: driver home theo dir (diem dung S), STM32 di tiep cham qua vung kim loai toi khi nha (E).
+ * Giua vung kim loai = (S + E) / 2. home_x10 = goc cua S tinh tu giua. Khong doi offset. */
 home_status_t home_measure(uint8_t n, int8_t dir_override, int32_t *home_x10, int32_t *band_x10)
 {
     joint_t *j = joint_get(n);
     if (!j) return HOME_ERR_ARG;
-    home_cfg_t cc = cfg[n - 1];                   /* ban sao de dung chieu nhap tu lenh neu co */
-    if (dir_override == 1 || dir_override == -1) cc.dir = dir_override;
-    const home_cfg_t *c = &cc;
-    int32_t m_near, m_out, m_far;
+    const home_cfg_t *c = &cfg[n - 1];
+    int8_t dir = (dir_override == 1 || dir_override == -1) ? dir_override : c->dir;
+    int32_t m_s, m_e;
     home_status_t st;
 
-    if (!wait_ms(DEBOUNCE_SAMPLES + 2)) return HOME_ERR_ABORT;
-    if (home_sensor(n)) return HOME_ERR_STUCK_ON;   /* can bat dau o ngoai vung kim loai, phia binh thuong */
-
+#if !HOME_USE_DRIVER
+    /* STM32 tu do: mep gan (tu ngoai vao), di qua vung kim loai, quay lai tim mep xa (tu phia kia vao) */
+    int32_t m_out, m_far;
+    st = leave_sensor(n, dir);
+    if (st != HOME_OK) return st;
     printf("  1/3 Tim mep gan...\r\n");
-    st = seek_dir(n, c->dir, c->fast_dps_x10, 1, c->travel_x10, &m_near);
+    st = seek_dir(n, dir, c->fast_dps_x10, 1, c->travel_x10, &m_s);
+    if (st != HOME_OK) return st;
+    printf("  2/3 Di qua vung kim loai...\r\n");
+    st = seek_dir(n, dir, c->slow_dps_x10, 0, BAND_MAX_X10, &m_out);
+    if (st != HOME_OK) return st;
+    if (!wait_ms(200)) return HOME_ERR_ABORT;
+    printf("  3/3 Quay lai tim mep xa...\r\n");
+    st = seek_dir(n, (int8_t)-dir, c->slow_dps_x10, 1, BAND_MAX_X10, &m_far);
+    if (st != HOME_OK) return st;
+    {
+        int32_t m_mid = m_s + (m_far - m_s) / 2;
+        *home_x10 = div_round((m_s - m_mid) * j->dir, (int32_t)j->ratio);
+        *band_x10 = div_round(iabs(m_far - m_s), (int32_t)j->ratio);
+        j->target_x10 = joint_of(j, m_far);
+    }
+    return HOME_OK;
+#endif
+
+    if (c->cw_pos == 0) return HOME_ERR_NOT_CONFIG;
+
+    st = leave_sensor(n, dir);
     if (st != HOME_OK) return st;
 
-    printf("  2/3 Di qua vung kim loai...\r\n");
-    st = seek_dir(n, c->dir, c->slow_dps_x10, 0, BAND_MAX_X10, &m_out);
+    printf("  1/2 Driver home toi cam bien...\r\n");
+    st = driver_home(n, dir, c->travel_x10, &m_s);
     if (st != HOME_OK) return st;
     if (!wait_ms(200)) return HOME_ERR_ABORT;
 
-    printf("  3/3 Quay lai tim mep xa...\r\n");
-    st = seek_dir(n, (int8_t)-c->dir, c->slow_dps_x10, 1, BAND_MAX_X10, &m_far);
+    printf("  2/2 Di cham qua vung kim loai...\r\n");
+    st = seek_dir(n, dir, c->slow_dps_x10, 0, BAND_MAX_X10, &m_e);
     if (st != HOME_OK) return st;
 
-    *home_x10 = joint_of(j, m_near);
-    *band_x10 = iabs(joint_of(j, m_near) - joint_of(j, m_far));
-    j->target_x10 = joint_of(j, m_far);
+    int32_t m_mid = m_s + (m_e - m_s) / 2;
+    *home_x10 = div_round((m_s - m_mid) * j->dir, (int32_t)j->ratio);
+    *band_x10 = div_round(iabs(m_e - m_s), (int32_t)j->ratio);
+    j->target_x10 = joint_of(j, m_e);
     return HOME_OK;
+}
+
+/* HOME_MODE 2: driver tu home theo thong so menu. Chi gui 9A, theo doi co 3B va quang duong */
+static home_status_t driver_home_menu(uint8_t n, uint32_t max_x10, int32_t *m_stop, uint8_t *on_sensor)
+{
+    const home_cfg_t *c = &cfg[n - 1];
+    joint_t *j = joint_get(n);
+    int32_t  m0, m;
+    uint8_t  reply, f, seen_busy = 0;
+    uint32_t t_need = (uint32_t)max_x10 * j->ratio * 100u / ((uint32_t)c->rpm * 6u);   /* ms */
+    uint32_t tmo    = t_need * 3u / 2u + 4000u;
+
+    *on_sensor = 0;
+    if (zdt_read_position(j->addr, &m0) != ZDT_OK) return HOME_ERR_DRIVER;
+    if (zdt_home_trigger(j->addr, ZDT_HOME_MODE_ENDSTOP, &reply) != ZDT_OK) return HOME_ERR_DRIVER;
+    if (reply == 0x12 || reply == 0x22) { *on_sensor = 1; return HOME_OK; }
+
+    uint32_t t0 = HAL_GetTick();
+    int32_t  limit_m = (int32_t)(max_x10 + 50u) * j->ratio;
+    for (;;) {
+        if (!wait_ms(POLL_MS)) { (void)zdt_home_abort(j->addr); stop_joint(j); return HOME_ERR_ABORT; }
+        if (zdt_read_home_flags(j->addr, &f) != ZDT_OK) { (void)zdt_home_abort(j->addr); return HOME_ERR_DRIVER; }
+        if (zdt_read_position(j->addr, &m) != ZDT_OK)   { (void)zdt_home_abort(j->addr); return HOME_ERR_DRIVER; }
+        if (f & ZDT_HOME_BUSY) seen_busy = 1;
+        uint32_t el = HAL_GetTick() - t0;
+        /* driver co the dat lai vi tri ve 0 khi home xong: chi xet quang duong khi dang home */
+        if ((f & ZDT_HOME_BUSY) && iabs(m - m0) > limit_m) {
+            (void)zdt_home_abort(j->addr); stop_joint(j); return HOME_ERR_NOT_FOUND;
+        }
+        if (el > tmo) { (void)zdt_home_abort(j->addr); stop_joint(j); return HOME_ERR_TIMEOUT; }
+        if (iabs(m - m0) > 5) seen_busy = 1;                /* home xong qua nhanh, truoc lan doc dau */
+        if (!(f & ZDT_HOME_BUSY) && (seen_busy || el > 500u)) {
+            if (f & ZDT_HOME_FAIL) return HOME_ERR_NOT_FOUND;
+            if (!seen_busy) return HOME_ERR_STALL;          /* driver khong chay home */
+            HAL_Delay(150);
+            if (zdt_read_position(j->addr, &m) != ZDT_OK) return HOME_ERR_DRIVER;
+            *m_stop = m;
+            return HOME_OK;
+        }
+    }
 }
 
 home_status_t home_joint(uint8_t n)
@@ -380,38 +474,83 @@ home_status_t home_joint(uint8_t n)
     if (!j) return HOME_ERR_ARG;
     const home_cfg_t *c = &cfg[n - 1];
     if (!c->enabled) return HOME_ERR_NOT_CONFIG;
+#if HOME_MODE == 2
+    {
+        homed[n - 1] = 0;
+        printf("Home khop %u (driver, thong so menu):\r\n", n);
+        int32_t m_stop = 0, m;
+        uint8_t on;
+        home_status_t st = driver_home_menu(n, c->travel_x10, &m_stop, &on);
+        if (st == HOME_OK && on) {
+            /* Driver bao dang o tren cam bien: lui nguoc chieu dir ra khoi vung kim loai roi home lai */
+            printf("  Dang tren cam bien, lui ra...\r\n");
+            if (zdt_read_position(j->addr, &m) != ZDT_OK) return HOME_ERR_DRIVER;
+            st = move_to(n, joint_of(j, m) - (int32_t)c->dir * ((int32_t)c->band_x10 + 50), c->slow_dps_x10);
+            if (st != HOME_OK) return st;
+            st = driver_home_menu(n, c->travel_x10, &m_stop, &on);
+            if (st == HOME_OK && on) return HOME_ERR_STUCK_ON;
+        }
+        if (st != HOME_OK) return st;
+
+        /* Cho driver dung = mep gan cua vung kim loai, goc khop tai do = home_x10 */
+        j->offset_x10 = m_stop - (int32_t)j->dir * (int32_t)j->ratio * c->home_x10;
+        j->target_x10 = c->home_x10;
+        printf("  Ve goc 0 (giua cam bien)...\r\n");
+        st = move_to(n, 0, c->slow_dps_x10);
+        if (st != HOME_OK) return st;
+        homed[n - 1] = 1;
+        return HOME_OK;
+    }
+#endif
+#if HOME_USE_DRIVER
+    if (c->cw_pos == 0) return HOME_ERR_NOT_CONFIG;
+#endif
 
     homed[n - 1] = 0;
     printf("Home khop %u:\r\n", n);
 
-    int32_t m_hit;
-    uint8_t far;
-    home_status_t st = find_edge(n, &m_hit, &far);
+    int32_t m_stop;
+    uint8_t far = 0;
+    home_status_t st;
+    uint8_t act;
+
+    if (!read_sensor(n, &act)) return HOME_ERR_DRIVER;
+    if (act) {
+        /* Dang tren kim loai: nhich cham nguoc chieu dir toi khi nha = mep gan */
+        printf("  Dang tren cam bien, nhich ra mep...\r\n");
+        uint32_t lim = c->band_x10 ? (uint32_t)c->band_x10 + 50u : BAND_MAX_X10;
+        st = seek_dir(n, (int8_t)-c->dir, c->slow_dps_x10, 0, lim, &m_stop);
+    } else {
+        printf("  Tim theo chieu dir (toi da %lu do)...\r\n", (unsigned long)(c->travel_x10 / 10));
+#if HOME_USE_DRIVER
+        st = driver_home(n, c->dir, c->travel_x10, &m_stop);
+#else
+        st = seek_dir(n, c->dir, c->fast_dps_x10, 1, c->travel_x10, &m_stop);
+#endif
+        if (st == HOME_ERR_NOT_FOUND && c->rev_x10 > 0) {
+            printf("  Khong thay, tim chieu nguoc...\r\n");
+#if HOME_USE_DRIVER
+            st = driver_home(n, (int8_t)-c->dir, (uint32_t)c->travel_x10 + c->rev_x10, &m_stop);
+#else
+            st = seek_dir(n, (int8_t)-c->dir, c->fast_dps_x10, 1, (uint32_t)c->travel_x10 + c->rev_x10, &m_stop);
+#endif
+            far = 1;
+        }
+    }
     if (st != HOME_OK) return st;
 
-    /* Goc khop tai diem gap:
-     *   mep gan: home_x10
-     *   mep xa : home_x10 + dir * band_x10 (vung kim loai nam phia dir so voi mep gan) */
+    /* Goc khop tai cho driver dung: mep gan = home_x10, mep xa = home_x10 + dir * band */
     int32_t at = c->home_x10;
-    if (far) {
-        at += (int32_t)c->dir * c->band_x10;
-        if (c->band_x10 == 0) printf("  CANH BAO: gap tu phia ben kia ma band_x10 = 0, goc co the lech. Chay hcal %u\r\n", n);
-    }
-    /* m_hit = offset + dir * ratio * at */
-    j->offset_x10 = m_hit - (int32_t)j->dir * (int32_t)j->ratio * at;
+    if (far) at += (int32_t)c->dir * c->band_x10;
+    j->offset_x10 = m_stop - (int32_t)j->dir * (int32_t)j->ratio * at;
     j->target_x10 = at;
 
-    /* Dua khop vao GIUA vung kim loai: den opto sang on dinh, rung tu khop khac khong lam cam bien nha.
-     * Vung kim loai nam phia dir so voi mep gan: giua = home_x10 + dir * band / 2 */
-    if (c->band_x10 > 0) {
-        int32_t mid = c->home_x10 + (int32_t)c->dir * (int32_t)(c->band_x10 / 2);
-        printf("  Vao giua cam bien (");
-        printf("%s%ld.%ld do)...\r\n", mid < 0 ? "-" : "", (long)(iabs(mid) / 10), (long)(iabs(mid) % 10));
-        st = move_to(n, mid, c->slow_dps_x10);
-        if (st != HOME_OK) return st;
-        if (!wait_ms(DEBOUNCE_SAMPLES + 2)) return HOME_ERR_ABORT;
-        if (!home_sensor(n)) printf("  CANH BAO: giua cam bien ma den khong sang, kiem tra band_x10 (chay lai hcal %u)\r\n", n);
-    }
+    /* Dua ve goc 0 = giua vung kim loai */
+    printf("  Ve goc 0 (giua cam bien)...\r\n");
+    st = move_to(n, 0, c->slow_dps_x10);
+    if (st != HOME_OK) return st;
+    if (!home_sensor(n)) printf("  CANH BAO: o goc 0 ma cam bien khong tac dong, chay lai hcal %u\r\n", n);
+
     homed[n - 1] = 1;
     return HOME_OK;
 }
@@ -420,7 +559,7 @@ home_status_t home_all(void)
 {
     for (uint8_t k = 0; k < JOINT_COUNT; k++) {
         uint8_t n = HOME_ORDER[k];
-        if (!cfg[n - 1].enabled) { printf("Bo qua khop %u (chua bat home)\r\n", n); continue; }
+        if (!cfg[n - 1].enabled) { printf("Bo qua khop %u (en = 0)\r\n", n); continue; }
         home_status_t st = home_joint(n);
         printf("Home khop %u: %s\r\n", n, home_status_str(st));
         if (st != HOME_OK) { joint_stop_all(); return st; }

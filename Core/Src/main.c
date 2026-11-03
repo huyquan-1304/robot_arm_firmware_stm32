@@ -18,6 +18,7 @@
 /* USER CODE END Header */
 /* Includes ------------------------------------------------------------------*/
 #include "main.h"
+#include "usb_device.h"
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
@@ -29,6 +30,9 @@
 #include "joint.h"
 #include "uart_rx.h"
 #include "ros_link.h"
+#include "link.h"
+#include "wrist.h"
+
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -71,9 +75,7 @@ static void MX_USART1_UART_Init(void);
 /* USER CODE BEGIN 0 */
 int __io_putchar(int ch)
 {
-    /* Che do ROS: USART1 chi chua goi nhi phan. Moi printf (ke ca tu home.c, zdt_x42s.c) bi bo */
-    if (ros_link_active()) return ch;
-    HAL_UART_Transmit(&huart1, (uint8_t *)&ch, 1, HAL_MAX_DELAY);
+    link_console_putc((uint8_t)ch);   /* USB + UART (duong dang chay ROS thi khong in) */
     return ch;
 }
 /* USER CODE END 0 */
@@ -109,6 +111,7 @@ int main(void)
   MX_GPIO_Init();
   MX_FDCAN1_Init();
   MX_TIM3_Init();
+  MX_USB_Device_Init();
   MX_USART1_UART_Init();
   /* USER CODE BEGIN 2 */
   setvbuf(stdout, NULL, _IONBF, 0);
@@ -119,10 +122,11 @@ int main(void)
   }
 
   servo_start();   /* PWM 50 Hz tren PA6, chua phat xung cho toi khi co lenh gripper */
+  wrist_start();   /* khop 5, PWM TIM3 CH2 */      // <- thêm dòng này
   joint_init();    /* goc 0 cua moi khop = vi tri luc bat nguon */
   cmd_uart_init(); /* in danh sach lenh va quet 4 driver */
   ros_link_init(); /* giao tiep nhi phan voi Pi, tu bat khi nhan goi dau tien */
-  uart_rx_init();  /* bat ngat nhan USART1, dat SAU cmd_uart_init de khong mat byte */
+  link_init();     /* bat nhan UART; USB da duoc MX_USB_Device_Init() khoi tao */
   /* USER CODE END 2 */
 
   /* Infinite loop */
@@ -132,6 +136,7 @@ int main(void)
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
+	link_task();     /* day du lieu USB di */
     cmd_uart_poll();   /* console text, hoac chuyen byte cho ros_link khi o che do ROS */
     ros_link_task();   /* che do ROS: watchdog, gui lenh, doc vi tri, gui STATE 50 Hz */
   }
@@ -159,10 +164,10 @@ void SystemClock_Config(void)
   RCC_OscInitStruct.PLL.PLLState = RCC_PLL_ON;
   RCC_OscInitStruct.PLL.PLLSource = RCC_PLLSOURCE_HSE;
   RCC_OscInitStruct.PLL.PLLM = RCC_PLLM_DIV1;
-  RCC_OscInitStruct.PLL.PLLN = 16;
+  RCC_OscInitStruct.PLL.PLLN = 12;
   RCC_OscInitStruct.PLL.PLLP = RCC_PLLP_DIV2;
   RCC_OscInitStruct.PLL.PLLQ = RCC_PLLQ_DIV2;
-  RCC_OscInitStruct.PLL.PLLR = RCC_PLLR_DIV8;
+  RCC_OscInitStruct.PLL.PLLR = RCC_PLLR_DIV6;
   if (HAL_RCC_OscConfig(&RCC_OscInitStruct) != HAL_OK)
   {
     Error_Handler();
@@ -278,6 +283,10 @@ static void MX_TIM3_Init(void)
   {
     Error_Handler();
   }
+  if (HAL_TIM_PWM_ConfigChannel(&htim3, &sConfigOC, TIM_CHANNEL_2) != HAL_OK)
+  {
+    Error_Handler();
+  }
   /* USER CODE BEGIN TIM3_Init 2 */
 
   /* USER CODE END TIM3_Init 2 */
@@ -351,8 +360,8 @@ static void MX_GPIO_Init(void)
   __HAL_RCC_GPIOB_CLK_ENABLE();
   __HAL_RCC_GPIOD_CLK_ENABLE();
 
-  /*Configure GPIO pins : LSW3_Pin LSW1_Pin LSW2_Pin LSW4_Pin */
-  GPIO_InitStruct.Pin = LSW3_Pin|LSW1_Pin|LSW2_Pin|LSW4_Pin;
+  /*Configure GPIO pins : LSW1_Pin LSW2_Pin LSW3_Pin LSW4_Pin */
+  GPIO_InitStruct.Pin = LSW1_Pin|LSW2_Pin|LSW3_Pin|LSW4_Pin;
   GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
   GPIO_InitStruct.Pull = GPIO_PULLUP;
   HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);

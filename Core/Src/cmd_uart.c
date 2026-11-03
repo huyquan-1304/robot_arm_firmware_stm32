@@ -1,10 +1,12 @@
 #include "cmd_uart.h"
 #include "uart_rx.h"
+#include "link.h"
 #include "ros_link.h"
 #include "zdt_x42s.h"
 #include "bsp_can.h"
 #include "joint.h"
 #include "home.h"
+#include "wrist.h"
 #include "main.h"
 
 /* 0 = khong dung gripper, 1 = co gripper servo tren PA6 (TIM3 CH1) */
@@ -277,12 +279,12 @@ static void cmd_scan(void)
  *             duoc xu ly binh thuong, khong bi coi la "bam phim". */
 static int uart_key_abort(void)
 {
+    wrist_update();         /* khop 5 tiep tuc chay cham trong luc home */
 #if USE_SERVO
     (void)servo_update();   /* cho gripper tiep tuc chay cham trong luc home */
 #endif
     if (ros_link_active()) return ros_link_poll_blocking();
-    uint8_t b;
-    return uart_rx_get(&b);
+    return link_any_key();              /* phim bam tu USB hoac UART */
 }
 
 static void print_lsw(void)
@@ -370,13 +372,17 @@ static void print_help(void)
     printf("  lsw                trang thai 4 cam bien hanh trinh\r\n");
     printf("  lsw w              theo doi cam bien lien tuc (bam phim de thoat)\r\n");
     printf("  lsj <n> <+|->      chay khop n theo chieu goc tang/giam, tu dung khi cham cam bien\r\n");
-    printf("  hcal <n> [+|-]     do mep cam bien va be rong vung kim loai khop n (KHONG doi goc 0)\r\n");
+    printf("  hcw <n>            do chieu CW cua driver khop n (dien cw_pos trong home.c)\r\n");
+    printf("  hcal <n> [+|-]     driver home roi do be rong vung kim loai khop n (KHONG doi goc 0)\r\n");
     printf("                     +/- = chieu tim (bo trong = theo bang dir trong home.c)\r\n");
     printf("  home [n]           home khop n, bo trong = tat ca (kem mo gripper). Bam phim bat ky de huy\r\n");
 #if USE_SERVO
     printf("  o / n / u          gripper: mo / kep vat / dong het (chay cham)\r\n");
     printf("  s <us>             gripper: do rong xung 500..2500, s 0 = tha long\r\n");
 #endif
+    printf("  w                  khop 5 (xoay gripper): xem goc va xung\r\n");
+    printf("  w <do>             khop 5 xoay toi goc (vd: w -45), gioi han -90..90\r\n");
+    printf("  wu <us>            khop 5 xung tho de hieu chuan (vd: wu 1500), wu 0 = tha long\r\n");
     printf("  h                  hien danh sach lenh\r\n");
 }
 
@@ -392,6 +398,13 @@ home_status_t cmd_home_all(void)
 #endif
     home_status_t s = home_all();
     printf("Home tat ca: %s\r\n", home_status_str(s));
+    if (s == HOME_OK) {
+        /* Khop 5 ve 0 SAU KHI 4 khop da home (tay da thu gon). Lan dau phat xung servo nhay thang toi 0 */
+        (void)wrist_move_x10(0);
+        uint32_t tw = HAL_GetTick();
+        while (wrist_busy() && HAL_GetTick() - tw < 2000) wrist_update();
+        printf("Khop 5: ve 0 (%u us)\r\n", wrist_get_us());
+    }
 #if USE_SERVO
     /* cho gripper mo het neu home xong truoc (toi da khoang 3 s) */
     uint32_t t0 = HAL_GetTick();
@@ -529,6 +542,31 @@ static void execute(char *cmd)
             printf("lsj khop %u: %s\r\n", n, home_status_str(s));
         }
     }
+    else if (!strcmp(c, "hcw")) {
+        if (!(n = arg_joint(a1))) return;
+        int8_t cw;
+        printf("Khop %u: thu lenh home CW cua driver 0.5 s (bam phim de huy)\r\n", n);
+        home_status_t s = home_probe_cw(n, &cw);
+        if (s == HOME_OK) printf("Khop %u: CW lam vi tri dong co %s -> dien cw_pos = %d trong home.c\r\n",
+                                 n, cw > 0 ? "TANG" : "GIAM", cw);
+        else if (s == HOME_ERR_STUCK_ON) printf("Khop %u dang tren cam bien. Lui ra truoc (vd: jr %u 10)\r\n", n, n);
+        else printf("hcw khop %u: %s\r\n", n, home_status_str(s));
+    }
+    else if (!strcmp(c, "w")) {
+        if (!a1) {
+            printf("Khop 5: "); print_x10(wrist_get_x10());
+            printf(" do, xung %u us%s\r\n", wrist_get_us(), wrist_get_us() ? "" : " (chua phat xung)");
+            return;
+        }
+        int32_t d = (int32_t)(atof(a1) * 10.0f + (atof(a1) >= 0 ? 0.5f : -0.5f));
+        if (wrist_move_x10(d)) { printf("Khop 5 toi "); print_x10(d); printf(" do\r\n"); }
+        else printf("Khop 5: goc ngoai gioi han -90..90 do\r\n");
+    }
+    else if (!strcmp(c, "wu")) {
+        if (!a1) { printf("Khop 5 dang o %u us\r\n", wrist_get_us()); return; }
+        wrist_set_us((uint16_t)atoi(a1));
+        printf("Khop 5: %u us\r\n", wrist_get_us());
+    }
     else if (!strcmp(c, "hcal")) {
         if (!(n = arg_joint(a1))) return;
         int32_t deg, band;
@@ -538,7 +576,7 @@ static void execute(char *cmd)
         home_status_t s = home_measure(n, dov, &deg, &band);
         if (s == HOME_OK) {
             printf("Khop %u: mep gan tai ", n); print_x10(deg);
-            printf(" do (so voi tu the bat nguon), be rong vung kim loai "); print_x10(band);
+            printf(" do (tinh tu giua vung kim loai), be rong vung kim loai "); print_x10(band);
             printf(" do\r\n  -> dien ");
             if (dov) printf("dir = %s1, ", dov > 0 ? "+" : "-");
             printf("home_x10 = %ld, band_x10 = %ld cho khop %u trong home.c\r\n", (long)deg, (long)band, n);
@@ -594,11 +632,12 @@ static void execute(char *cmd)
         bsp_can_clear_diag();
         uint32_t t0 = HAL_GetTick(), ok = 0, fail = 0, last_print = t0, next = t0, k = 0;
         uint8_t key, rr = 0, stop = 0;
-        while (uart_rx_get(&key)) { }     /* bo ky tu xuong dong con sot cua lenh vua go */
+        link_flush_input();               /* bo ky tu xuong dong con sot cua lenh vua go */
         while (!stop && HAL_GetTick() - t0 < sec * 1000u) {
             if (ros_like) {
                 while ((int32_t)(HAL_GetTick() - next) < 0) {
-                    if (uart_rx_get(&key) && key != '\r' && key != '\n') { stop = 1; break; }
+                    link_task();
+                    if (link_get(&key, NULL) && key != '\r' && key != '\n') { stop = 1; break; }
                 }
                 if (stop) break;
                 next += 20u;
@@ -620,7 +659,7 @@ static void execute(char *cmd)
                 rr = (uint8_t)((rr + 1u) % JOINT_COUNT);
                 (void)zdt_poll_reached();
             }
-            if (o_u) (void)HAL_UART_Transmit(&huart1, (uint8_t *)junk, sizeof junk, 10);
+            if (o_u) link_test_write(junk, sizeof junk);      /* ghi ra ca USB va UART */
             if (HAL_GetTick() - last_print >= 2000u) {
                 last_print = HAL_GetTick();
                 bsp_can_diag_t d; bsp_can_get_diag(&d);
@@ -628,7 +667,8 @@ static void execute(char *cmd)
                        (unsigned long)((last_print - t0) / 1000u), (unsigned long)ok,
                        (unsigned long)fail, (unsigned long)d.busoff_count);
             }
-            if (!ros_like && uart_rx_get(&key) && key != '\r' && key != '\n') break;
+            link_task();
+            if (!ros_like && link_get(&key, NULL) && key != '\r' && key != '\n') break;
         }
         if (o_m) (void)joint_stream(4, base4, 200u);   /* tra khop 4 ve cho cu */
         uint32_t ms = HAL_GetTick() - t0;
@@ -691,10 +731,12 @@ void cmd_uart_init(void)
 
 void cmd_uart_poll(void)
 {
+    wrist_update();         /* khop 5 chay cham, ca che do console lan ROS */
+
     /* CHE DO ROS: chi chuyen byte cho ros_link, khong printf (se lam hong goi nhi phan) */
     if (ros_link_active()) {
         uint8_t b;
-        while (uart_rx_get(&b)) (void)ros_link_feed(b);
+        while (link_get_ros(&b)) (void)ros_link_feed(b);
         return;
     }
 
@@ -707,9 +749,9 @@ void cmd_uart_poll(void)
     uint8_t addr = zdt_poll_reached();
     if (addr) printf("\r\n[Khop %u da toi vi tri]\r\n> ", addr);
 
-    /* Byte nhan bang ngat (uart_rx.c), khong doc RDR truc tiep nua */
+    /* Byte tu USB (uu tien) hoac UART. Goi nhi phan tu Pi den duong nao thi ROS chay tren duong do */
     uint8_t b;
-    while (uart_rx_get(&b)) {
+    while (link_get(&b, NULL)) {
         if (ros_link_feed(b)) {                 /* byte cua goi nhi phan tu Pi */
             if (ros_link_active()) return;      /* vua vao che do ROS */
             continue;
