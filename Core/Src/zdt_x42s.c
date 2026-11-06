@@ -309,6 +309,42 @@ zdt_status_t zdt_read_speed(uint8_t addr, int32_t *rpm_x10)      /* manual 5.5.1
     return ZDT_OK;
 }
 
+/* ---- Chi co tren ZDT M370 (banh xe), manual M370 muc 5.5.6 / 5.5.7 ---- */
+
+zdt_status_t zdt_read_gear(uint8_t addr, uint32_t *ratio_x100)   /* 47 6B */
+{
+    uint8_t d[8], n;
+    zdt_status_t s = zdt_cmd_read(addr, 0x47, d, &n);
+    if (s != ZDT_OK) return s;
+    if (n < 6) return ZDT_ERR_OTHER;
+    *ratio_x100 = be32(&d[1]);
+    return ZDT_OK;
+}
+
+/* 6A 51 | luu | ti so (4 byte, don vi 0.01) | 6B  -> 8 byte, 1 frame */
+zdt_status_t zdt_write_gear(uint8_t addr, uint32_t ratio_x100, uint8_t store)
+{
+    uint8_t cmd[8] = { 0x6A, 0x51, (uint8_t)(store ? 1 : 0),
+                       (uint8_t)(ratio_x100 >> 24), (uint8_t)(ratio_x100 >> 16),
+                       (uint8_t)(ratio_x100 >> 8),  (uint8_t)ratio_x100, ZDT_CHECKSUM };
+    return zdt_cmd_ack(addr, cmd, 8);
+}
+
+/* M370 5.5.2: AE 4B | luu | dia chi moi | 6B. Driver co the tra loi bang dia chi cu hoac moi,
+ * nen ben goi phai doc lai bang dia chi moi de xac nhan */
+zdt_status_t zdt_write_id(uint8_t addr, uint8_t new_addr, uint8_t store)
+{
+    uint8_t cmd[5] = { 0xAE, 0x4B, (uint8_t)(store ? 1 : 0), new_addr, ZDT_CHECKSUM };
+    return zdt_cmd_ack(addr, cmd, 5);
+}
+
+/* M370 5.1.1: 06 45 6B, hieu chuan dong co (banh phai khong cham dat) */
+zdt_status_t zdt_calibrate(uint8_t addr)
+{
+    uint8_t cmd[3] = { 0x06, 0x45, ZDT_CHECKSUM };
+    return zdt_cmd_ack(addr, cmd, 3);
+}
+
 zdt_status_t zdt_read_home_flags(uint8_t addr, uint8_t *flags)   /* manual 5.4.4 */
 {
     uint8_t d[8], n;

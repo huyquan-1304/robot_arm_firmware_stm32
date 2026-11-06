@@ -84,6 +84,18 @@ zdt_status_t zdt_read_speed(uint8_t addr, int32_t *rpm_x10);
 /* Doc co trang thai (lenh 3A) */
 zdt_status_t zdt_read_flags(uint8_t addr, uint8_t *flags);
 
+/* Chi co tren ZDT M370 (banh xe): ti so truyen, don vi 0.01 (13100 = 1:131).
+ * Sau khi dat, toc do va vi tri cua driver tinh o truc ra. store = 1: luu vinh vien */
+zdt_status_t zdt_read_gear(uint8_t addr, uint32_t *ratio_x100);
+zdt_status_t zdt_write_gear(uint8_t addr, uint32_t ratio_x100, uint8_t store);
+
+/* Doi dia chi driver (lenh AE, dung cho ca M370). store = 1: luu vinh vien.
+ * Tren bus chi duoc co 1 driver mang dia chi 'addr' luc goi */
+zdt_status_t zdt_write_id(uint8_t addr, uint8_t new_addr, uint8_t store);
+
+/* Hieu chuan dong co M370 (lenh 06 45), thay cho menu Cal tren OLED */
+zdt_status_t zdt_calibrate(uint8_t addr);
+
 /* Tham so vong dieu khien firmware X (manual 5.6.14 / 5.6.15).
  * Mac dinh X42S: pos_kp_trap = pos_kp_direct = 126640, vel_kp = 15600, vel_ki = 26 */
 typedef struct {
