@@ -7,7 +7,7 @@
 #include "joint.h"
 #include "home.h"
 #include "wrist.h"
-#include "wheel.h"
+#include "motor.h"
 #include "mecanum.h"
 #include "main.h"
 
@@ -385,7 +385,7 @@ static void print_help(void)
     printf("  w                  khop 5 (xoay gripper): xem goc va xung\r\n");
     printf("  w <do>             khop 5 xoay toi goc (vd: w -45), gioi han -90..90\r\n");
     printf("  wu <us>            khop 5 xung tho de hieu chuan (vd: wu 1500), wu 0 = tha long\r\n");
-    wheel_print_help();
+    motor_print_help();
     mecanum_print_help();
     printf("  h                  hien danh sach lenh\r\n");
 }
@@ -434,8 +434,8 @@ static void execute(char *cmd)
     if (!strcmp(c, "h")) {
         print_help();
     }
-    else if (!strcmp(c, "bx")) {
-        wheel_cmd(argc, argv);
+    else if (!strcmp(c, "m")) {
+        motor_cmd(argc, argv);
     }
     else if (!strcmp(c, "xe")) {
         mecanum_cmd(argc, argv);
@@ -742,7 +742,7 @@ void cmd_uart_init(void)
 void cmd_uart_poll(void)
 {
     wrist_update();         /* khop 5 chay cham, ca che do console lan ROS */
-    wheel_task();           /* banh xe: tu dung khi het gio test */
+    motor_task();           /* banh xe: thong bao het gio / ket truc */
     mecanum_task();         /* xe 4 banh: tu dung, bao toi noi */
 
     /* CHE DO ROS: chi chuyen byte cho ros_link, khong printf (se lam hong goi nhi phan) */
