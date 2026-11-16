@@ -68,8 +68,8 @@ typedef struct {
 } mot_t;
 
 static mot_t mt[MOT_COUNT] = {
-    { "FL", &htim1, TIM_CHANNEL_1, GPIOB, GPIO_PIN_12, GPIOB, GPIO_PIN_13, &htim2, 1, MOT_DIR_FL, MOT_ENC_FL },
-    { "FR", &htim1, TIM_CHANNEL_2, GPIOB, GPIO_PIN_14, GPIOB, GPIO_PIN_15, &htim4, 0, MOT_DIR_FR, MOT_ENC_FR },
+    { "FL", &htim1, TIM_CHANNEL_1, GPIOD, GPIO_PIN_8,  GPIOD, GPIO_PIN_9,  &htim2, 1, MOT_DIR_FL, MOT_ENC_FL },
+    { "FR", &htim1, TIM_CHANNEL_2, GPIOD, GPIO_PIN_10, GPIOD, GPIO_PIN_11, &htim4, 0, MOT_DIR_FR, MOT_ENC_FR },
     { "RL", &htim1, TIM_CHANNEL_3, GPIOD, GPIO_PIN_14, GPIOD, GPIO_PIN_15, &htim8, 0, MOT_DIR_RL, MOT_ENC_RL },
     { "RR", &htim1, TIM_CHANNEL_4, GPIOE, GPIO_PIN_7,  GPIOE, GPIO_PIN_8,  &htim5, 1, MOT_DIR_RR, MOT_ENC_RR },
 };
@@ -256,9 +256,26 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
 
 /* ------------------------------------------------------------------ */
 
+/* Bat dien tro keo len cho 8 chan encoder (trong .ioc dang de No pull).
+ * Ghi thang thanh ghi PUPDR nen Generate Code lai cung khong mat */
+static void enc_pullups(void)
+{
+    static const struct { GPIO_TypeDef *port; uint8_t pin; } enc_pins[] = {
+        { GPIOA, 0 }, { GPIOA, 1 },     /* TIM2 FL */
+        { GPIOD, 12 }, { GPIOD, 13 },   /* TIM4 FR */
+        { GPIOC, 6 }, { GPIOC, 7 },     /* TIM8 RL */
+        { GPIOB, 2 }, { GPIOC, 12 },    /* TIM5 RR */
+    };
+    for (unsigned i = 0; i < sizeof(enc_pins) / sizeof(enc_pins[0]); i++) {
+        uint32_t sh = 2u * enc_pins[i].pin;
+        MODIFY_REG(enc_pins[i].port->PUPDR, 3u << sh, 1u << sh);   /* 01 = pull-up */
+    }
+}
+
 void motor_init(void)
 {
     stby(0);
+    enc_pullups();
     for (int i = 0; i < MOT_COUNT; i++) {
         mot_t *m = &mt[i];
         /* Bo loc dau vao kenh 2 = 10 (CubeMX khong cho dat) */
