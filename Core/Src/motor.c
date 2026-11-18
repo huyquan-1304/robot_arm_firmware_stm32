@@ -7,7 +7,7 @@
 #include <string.h>
 
 /* Handle do CubeMX tao trong main.c */
-extern TIM_HandleTypeDef htim1;   /* PWM 4 kenh */
+extern I2C_HandleTypeDef hi2c3;   /* 2 module MKE-M18 */
 extern TIM_HandleTypeDef htim2;   /* encoder FL (32 bit) */
 extern TIM_HandleTypeDef htim4;   /* encoder FR (16 bit) */
 extern TIM_HandleTypeDef htim5;   /* encoder RR (32 bit) */
@@ -19,8 +19,25 @@ extern TIM_HandleTypeDef htim6;   /* nhip PID 200 Hz */
 #define HIST_N      4u            /* toc do = trung binh 4 chu ky (20 ms) */
 #define POS_TOL_REV (1.0f / 360.0f)   /* toi dich khi sai so < 1 do */
 
-#define STBY_PORT   GPIOE
-#define STBY_PIN    GPIO_PIN_10
+/* Giao thuc MKE-M18: [0x05][mode][payload 4 byte big-endian], payload = (thoi_gian_ms << 16) | toc_do */
+#define MKE_REGION        0x05u
+#define MKE_CMD_SET_ADDR  1u
+#define MKE_CMD_GET_ADDR  10u
+#define MKE_CMD_FREQ      104u
+#define MKE_CMD_A_CW      106u
+#define MKE_CMD_A_CCW     107u
+#define MKE_CMD_B_CW      108u
+#define MKE_CMD_B_CCW     109u
+#define MKE_CMD_A_STOP    110u
+#define MKE_CMD_B_STOP    111u
+#define MKE_CMD_GET_VIN   112u
+#define I2C_TIMEOUT_MS    5u
+#define I2C_STUCK_MS      20u      /* 1 dot gui qua 20 ms chua xong -> coi la treo, phuc hoi bus */
+
+/* I2C3: PC8 = SCL, PC9 = SDA (dung khi phuc hoi bus) */
+#define I2C_PORT    GPIOC
+#define I2C_SCL     GPIO_PIN_8
+#define I2C_SDA     GPIO_PIN_9
 
 typedef enum { MODE_OFF = 0, MODE_PWM, MODE_VEL, MODE_POS } mot_mode_t;
 
@@ -31,15 +48,13 @@ typedef enum { MODE_OFF = 0, MODE_PWM, MODE_VEL, MODE_POS } mot_mode_t;
 #define EVT_REVERSE   0x08u
 
 typedef struct {
-    /* cau hinh phan cung */
+    /* cau hinh */
     const char        *name;
-    TIM_HandleTypeDef *pwm_tim;
-    uint32_t           pwm_ch;
-    GPIO_TypeDef      *in1_port; uint16_t in1_pin;
-    GPIO_TypeDef      *in2_port; uint16_t in2_pin;
+    uint8_t            i2c_addr;
+    uint8_t            chan_b;     /* 0 = kenh A, 1 = kenh B cua module */
     TIM_HandleTypeDef *enc_tim;
     uint8_t            enc32;      /* 1 = timer 32 bit */
-    int8_t             dir;        /* dau PWM -> lan ve truoc */
+    int8_t             dir;        /* dau lenh -> lan ve truoc */
     int8_t             enc_dir;    /* dau encoder -> lan ve truoc */
 
     /* trang thai (ISR ghi, main doc) */
@@ -49,7 +64,7 @@ typedef struct {
     int32_t            hist[HIST_N];
     uint8_t            hidx;
     volatile float     rpm;
-    volatile float     duty;       /* % ap dung, -100..100 */
+    volatile float     duty;       /* % dang gui, -100..100 */
 
     /* lenh */
     float              duty_cmd;   /* MODE_PWM */
@@ -61,17 +76,17 @@ typedef struct {
     volatile uint8_t   done;
 
     volatile uint32_t  ms_left;    /* tu dung (0 = khong hen gio) */
-    uint8_t            off_at_zero; /* het gio o che do van toc: ve 0 roi tha */
+    uint8_t            off_at_zero;
     uint32_t           stall_ms, rev_ms;
     volatile uint8_t   fault;
     volatile uint8_t   evt;
 } mot_t;
 
 static mot_t mt[MOT_COUNT] = {
-    { "FL", &htim1, TIM_CHANNEL_1, GPIOD, GPIO_PIN_8,  GPIOD, GPIO_PIN_9,  &htim2, 1, MOT_DIR_FL, MOT_ENC_FL },
-    { "FR", &htim1, TIM_CHANNEL_2, GPIOD, GPIO_PIN_10, GPIOD, GPIO_PIN_11, &htim4, 0, MOT_DIR_FR, MOT_ENC_FR },
-    { "RL", &htim1, TIM_CHANNEL_3, GPIOD, GPIO_PIN_14, GPIOD, GPIO_PIN_15, &htim8, 0, MOT_DIR_RL, MOT_ENC_RL },
-    { "RR", &htim1, TIM_CHANNEL_4, GPIOE, GPIO_PIN_7,  GPIOE, GPIO_PIN_8,  &htim5, 1, MOT_DIR_RR, MOT_ENC_RR },
+    { "FL", MOT_I2C_ADDR_FRONT, 0, &htim2, 1, MOT_DIR_FL, MOT_ENC_FL },
+    { "FR", MOT_I2C_ADDR_FRONT, 1, &htim4, 0, MOT_DIR_FR, MOT_ENC_FR },
+    { "RL", MOT_I2C_ADDR_REAR,  0, &htim8, 0, MOT_DIR_RL, MOT_ENC_RL },
+    { "RR", MOT_I2C_ADDR_REAR,  1, &htim5, 1, MOT_DIR_RR, MOT_ENC_RR },
 };
 
 static float kff  = MOT_KFF_DEFAULT;
@@ -84,6 +99,17 @@ static volatile uint8_t started = 0;
 /* Lenh vi tri xep hang cho nhom (mot_group_begin / go) */
 static uint8_t grp_open = 0;
 static struct { uint8_t on; float deg, vmax, acc; } staged[MOT_COUNT];
+
+/* ---- Gui I2C theo ngat: 4 goi lien tiep, goi sau bat dau khi goi truoc xong ---- */
+static uint8_t           txbuf[MOT_COUNT][6];
+static volatile int8_t   tx_idx   = -1;      /* -1 = ranh */
+static volatile uint32_t tx_t0    = 0;
+static volatile uint8_t  i2c_pause = 0;      /* 1 = main dang dung bus (doc Vin, doi dia chi...) */
+static volatile uint8_t  i2c_need_recover = 0;
+static uint8_t           tick_div = 0;
+
+/* Dem loi de xem nhieu */
+static volatile uint32_t n_sent = 0, n_nack = 0, n_buserr = 0, n_skip = 0, n_recover = 0;
 
 /* ------------------------------------------------------------------ */
 
@@ -106,36 +132,126 @@ static void pf1(float v)
     printf("%ld.%ld", (long)(x / 10), (long)(x % 10));
 }
 
-static void stby(int on)
+static void pack(uint8_t *b, uint8_t mode, uint32_t payload)
 {
-    HAL_GPIO_WritePin(STBY_PORT, STBY_PIN, on ? GPIO_PIN_SET : GPIO_PIN_RESET);
+    b[0] = MKE_REGION;
+    b[1] = mode;
+    b[2] = (uint8_t)(payload >> 24);
+    b[3] = (uint8_t)(payload >> 16);
+    b[4] = (uint8_t)(payload >> 8);
+    b[5] = (uint8_t)payload;
 }
 
-/* duty % (duong = lan ve truoc). brake = 1: duty 0 thi phanh ngan, 0: tha troi */
-static void output(mot_t *m, float duty, int brake)
+/* Dong goi lenh cho 1 banh tu duty % (duong = lan ve truoc) */
+static void pack_motor(int i)
 {
-    uint32_t arr = __HAL_TIM_GET_AUTORELOAD(m->pwm_tim);
-    float d = duty * (float)m->dir;
-    m->duty = duty;
+    mot_t *m = &mt[i];
+    float d = (m->mode == MODE_OFF) ? 0.0f : m->duty * (float)m->dir;
+    uint32_t spd = (uint32_t)(absf(d) * 255.0f / 100.0f + 0.5f);
+    if (spd > 255u) spd = 255u;
 
-    if (d > 0.0f) {
-        HAL_GPIO_WritePin(m->in1_port, m->in1_pin, GPIO_PIN_SET);
-        HAL_GPIO_WritePin(m->in2_port, m->in2_pin, GPIO_PIN_RESET);
-    } else if (d < 0.0f) {
-        HAL_GPIO_WritePin(m->in1_port, m->in1_pin, GPIO_PIN_RESET);
-        HAL_GPIO_WritePin(m->in2_port, m->in2_pin, GPIO_PIN_SET);
-    } else if (brake) {                       /* IN1 = IN2 = H, PWM = H: phanh ngan */
-        HAL_GPIO_WritePin(m->in1_port, m->in1_pin, GPIO_PIN_SET);
-        HAL_GPIO_WritePin(m->in2_port, m->in2_pin, GPIO_PIN_SET);
-        __HAL_TIM_SET_COMPARE(m->pwm_tim, m->pwm_ch, arr + 1u);
-        return;
-    } else {                                  /* IN1 = IN2 = L: tha troi */
-        HAL_GPIO_WritePin(m->in1_port, m->in1_pin, GPIO_PIN_RESET);
-        HAL_GPIO_WritePin(m->in2_port, m->in2_pin, GPIO_PIN_RESET);
+    uint8_t mode;
+    if (spd == 0u) mode = m->chan_b ? MKE_CMD_B_STOP : MKE_CMD_A_STOP;
+    else if (d > 0.0f) mode = m->chan_b ? MKE_CMD_B_CW : MKE_CMD_A_CW;
+    else mode = m->chan_b ? MKE_CMD_B_CCW : MKE_CMD_A_CCW;
+
+    uint32_t payload = (spd == 0u) ? 0u : (((uint32_t)MOT_CMD_HOLD_MS << 16) | spd);
+    pack(txbuf[i], mode, payload);
+}
+
+static void tx_start(int i)
+{
+    tx_idx = (int8_t)i;
+    if (HAL_I2C_Master_Transmit_IT(&hi2c3, (uint16_t)(mt[i].i2c_addr << 1), txbuf[i], 6) != HAL_OK) {
+        tx_idx = -1;                                  /* HAL ban: bo dot nay, dot sau gui lai */
+        n_skip++;
     }
-    float a = absf(d);
-    if (a > 100.0f) a = 100.0f;
-    __HAL_TIM_SET_COMPARE(m->pwm_tim, m->pwm_ch, (uint32_t)(a * (float)(arr + 1u) / 100.0f));
+}
+
+/* Goi tu ngat TIM6 moi 10 ms */
+static void tx_batch(void)
+{
+    if (i2c_pause || i2c_need_recover) return;
+    if (tx_idx >= 0) { n_skip++; return; }           /* dot truoc chua xong */
+    for (int i = 0; i < MOT_COUNT; i++) pack_motor(i);
+    tx_t0 = HAL_GetTick();
+    tx_start(0);
+}
+
+void HAL_I2C_MasterTxCpltCallback(I2C_HandleTypeDef *hi2c)
+{
+    if (hi2c != &hi2c3 || tx_idx < 0) return;
+    n_sent++;
+    int next = tx_idx + 1;
+    if (next < MOT_COUNT) tx_start(next);
+    else tx_idx = -1;
+}
+
+void HAL_I2C_ErrorCallback(I2C_HandleTypeDef *hi2c)
+{
+    if (hi2c != &hi2c3) return;
+    uint32_t e = HAL_I2C_GetError(hi2c);
+    if (e & (HAL_I2C_ERROR_BERR | HAL_I2C_ERROR_ARLO | HAL_I2C_ERROR_TIMEOUT)) {
+        n_buserr++;                                   /* loi bus (nhieu): bo dot nay, phuc hoi bus */
+        i2c_need_recover = 1;
+        tx_idx = -1;
+        return;
+    }
+    if (e & HAL_I2C_ERROR_AF) n_nack++;               /* module khong tra loi (chua cam / sai dia chi) */
+    int next = tx_idx + 1;                            /* van gui tiep cho cac banh con lai */
+    if (tx_idx >= 0 && next < MOT_COUNT) tx_start(next);
+    else tx_idx = -1;
+}
+
+/* Phuc hoi bus: tat I2C, phat 9 xung SCL de giai phong SDA, tao STOP, khoi dong lai */
+static void i2c_delay(void) { for (volatile int k = 0; k < 40; k++) { } }   /* ~5 us o 16 MHz */
+
+static void i2c_bus_recover(void)
+{
+    HAL_I2C_DeInit(&hi2c3);
+    GPIO_InitTypeDef g = {0};
+    g.Pin   = I2C_SCL | I2C_SDA;
+    g.Mode  = GPIO_MODE_OUTPUT_OD;
+    g.Pull  = GPIO_PULLUP;
+    g.Speed = GPIO_SPEED_FREQ_LOW;
+    HAL_GPIO_WritePin(I2C_PORT, I2C_SCL | I2C_SDA, GPIO_PIN_SET);
+    HAL_GPIO_Init(I2C_PORT, &g);
+    for (int k = 0; k < 9; k++) {
+        HAL_GPIO_WritePin(I2C_PORT, I2C_SCL, GPIO_PIN_RESET); i2c_delay();
+        HAL_GPIO_WritePin(I2C_PORT, I2C_SCL, GPIO_PIN_SET);   i2c_delay();
+    }
+    HAL_GPIO_WritePin(I2C_PORT, I2C_SDA, GPIO_PIN_RESET); i2c_delay();   /* STOP: SDA len khi SCL cao */
+    HAL_GPIO_WritePin(I2C_PORT, I2C_SDA, GPIO_PIN_SET);   i2c_delay();
+    HAL_GPIO_DeInit(I2C_PORT, I2C_SCL | I2C_SDA);
+    HAL_I2C_Init(&hi2c3);                                  /* MspInit gan lai chan AF */
+    n_recover++;
+}
+
+/* Main dung bus (doc / ghi lenh cham): dung gui theo ngat, cho dot dang chay xong */
+static void bus_take(void)
+{
+    i2c_pause = 1;
+    uint32_t t = HAL_GetTick();
+    while (tx_idx >= 0 && (HAL_GetTick() - t) < 30u) { }
+}
+static void bus_give(void) { i2c_pause = 0; }
+
+static HAL_StatusTypeDef mke_write(uint8_t addr, uint8_t mode, uint32_t payload)
+{
+    uint8_t b[6];
+    pack(b, mode, payload);
+    return HAL_I2C_Master_Transmit(&hi2c3, (uint16_t)(addr << 1), b, 6, I2C_TIMEOUT_MS);
+}
+
+static HAL_StatusTypeDef mke_read(uint8_t addr, uint8_t mode, uint32_t *val)
+{
+    uint8_t r[4];
+    if (mke_write(addr, mode, 0u) != HAL_OK) return HAL_ERROR;
+    uint32_t t = HAL_GetTick();
+    while ((HAL_GetTick() - t) < 2u) { }                   /* module can >= 200 us de chuan bi */
+    if (HAL_I2C_Master_Receive(&hi2c3, (uint16_t)(addr << 1), r, 4, I2C_TIMEOUT_MS) != HAL_OK) return HAL_ERROR;
+    *val = ((uint32_t)r[0] << 24) | ((uint32_t)r[1] << 16) | ((uint32_t)r[2] << 8) | r[3];
+    return HAL_OK;
 }
 
 /* PID toc do -> duty %. Chong bao hoa tich phan */
@@ -154,7 +270,7 @@ static void go_off(mot_t *m)
     m->mode = MODE_OFF;
     m->integ = 0.0f;
     m->ms_left = 0;
-    output(m, 0.0f, 0);
+    m->duty = 0.0f;
 }
 
 /* ------------------------------------------------------------------ */
@@ -190,14 +306,13 @@ static void motor_isr(void)
 
         /* 3. Dieu khien */
         float duty = 0.0f;
-        int   brake = 0;
         switch (m->mode) {
         case MODE_PWM:
             duty = m->duty_cmd;
             break;
         case MODE_VEL:
             if (m->v_ref == 0.0f && absf(m->rpm) < 1.0f) {
-                m->integ = 0.0f; brake = 1;
+                m->integ = 0.0f;                          /* duty 0 -> lenh STOP */
                 if (m->off_at_zero) { m->off_at_zero = 0; go_off(m); }
             }
             else duty = vel_ctrl(m, m->v_ref);
@@ -221,8 +336,7 @@ static void motor_isr(void)
             float err = m->p_target - pos;
             if (m->p_ref == m->p_target && absf(err) < POS_TOL_REV) {
                 if (!m->done) { m->done = 1; m->evt |= EVT_DONE; }
-                m->integ = 0.0f;
-                brake = 1;                              /* giu bang phanh ngan */
+                m->integ = 0.0f;                          /* toi dich: STOP, PID keo lai neu bi day lech */
             } else {
                 float v_cmd = m->prof_v * 60.0f + kpos * (m->p_ref - pos);
                 duty = vel_ctrl(m, clampf(v_cmd, -MOT_RPM_MAX, MOT_RPM_MAX));
@@ -243,10 +357,11 @@ static void motor_isr(void)
             if (m->rev_ms >= 300u)          { go_off(m); m->fault = 1; m->evt |= EVT_REVERSE; continue; }
         } else { m->stall_ms = 0; m->rev_ms = 0; }
 
-        /* 5. Xuat */
-        if (m->mode == MODE_OFF) output(m, 0.0f, 0);
-        else output(m, duty, brake);
+        m->duty = (m->mode == MODE_OFF) ? 0.0f : duty;
     }
+
+    /* 5. Gui lenh cho 2 module moi 10 ms */
+    if (++tick_div >= 2u) { tick_div = 0; tx_batch(); }
 }
 
 void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
@@ -274,25 +389,22 @@ static void enc_pullups(void)
 
 void motor_init(void)
 {
-    stby(0);
     enc_pullups();
     for (int i = 0; i < MOT_COUNT; i++) {
         mot_t *m = &mt[i];
-        /* Bo loc dau vao kenh 2 = 10 (CubeMX khong cho dat) */
+        /* Bo loc dau vao kenh 2 = 10 (phong khi CubeMX de 0) */
         MODIFY_REG(m->enc_tim->Instance->CCMR1, TIM_CCMR1_IC2F, 10u << TIM_CCMR1_IC2F_Pos);
         HAL_TIM_Encoder_Start(m->enc_tim, TIM_CHANNEL_ALL);
         m->enc_last = m->enc_tim->Instance->CNT;
-        HAL_TIM_PWM_Start(m->pwm_tim, m->pwm_ch);
         go_off(m);
     }
+    /* Dung ca 2 module ngay khi khoi dong */
+    (void)mke_write(MOT_I2C_ADDR_FRONT, MKE_CMD_A_STOP, 0u);
+    (void)mke_write(MOT_I2C_ADDR_FRONT, MKE_CMD_B_STOP, 0u);
+    (void)mke_write(MOT_I2C_ADDR_REAR,  MKE_CMD_A_STOP, 0u);
+    (void)mke_write(MOT_I2C_ADDR_REAR,  MKE_CMD_B_STOP, 0u);
     started = 1;
     HAL_TIM_Base_Start_IT(&htim6);
-}
-
-static int any_active(void)
-{
-    for (int i = 0; i < MOT_COUNT; i++) if (mt[i].mode != MODE_OFF) return 1;
-    return 0;
 }
 
 void mot_stop_all(void)
@@ -300,7 +412,6 @@ void mot_stop_all(void)
     __disable_irq();
     for (int i = 0; i < MOT_COUNT; i++) { go_off(&mt[i]); mt[i].done = 1; }
     __enable_irq();
-    stby(0);
 }
 
 static void stop_one(mot_t *m)
@@ -309,7 +420,6 @@ static void stop_one(mot_t *m)
     go_off(m);
     m->done = 1;
     __enable_irq();
-    if (!any_active()) stby(0);
 }
 
 void mot_set_rpm(mot_id_t id, float rpm)
@@ -325,7 +435,6 @@ void mot_set_rpm(mot_id_t id, float rpm)
     m->ms_left = 0;
     m->done = 1;
     __enable_irq();
-    stby(1);
 }
 
 static void start_pos(mot_t *m, float deg, float rpm_max, float acc)
@@ -353,7 +462,6 @@ void mot_move_rel(mot_id_t id, float deg, float rpm_max, float acc)
     __disable_irq();
     start_pos(&mt[id], deg, rpm_max, acc);
     __enable_irq();
-    stby(1);
 }
 
 void mot_group_begin(void)
@@ -365,7 +473,6 @@ void mot_group_begin(void)
 void mot_group_go(void)
 {
     grp_open = 0;
-    stby(1);
     __disable_irq();                          /* 4 banh bat dau trong cung 1 chu ky */
     for (int i = 0; i < MOT_COUNT; i++)
         if (staged[i].on && !mt[i].fault) start_pos(&mt[i], staged[i].deg, staged[i].vmax, staged[i].acc);
@@ -389,10 +496,23 @@ void mot_zero(mot_id_t id)
 }
 
 /* ------------------------------------------------------------------ */
-/* THONG BAO TU ISR */
+/* THONG BAO TU ISR, PHUC HOI I2C */
 
 void motor_task(void)
 {
+    /* Bus treo: co bao loi, hoac 1 dot gui qua lau chua xong */
+    if (!i2c_pause) {
+        if (tx_idx >= 0 && (HAL_GetTick() - tx_t0) > I2C_STUCK_MS) {
+            i2c_need_recover = 1;                       /* dat truoc de ngat TIM6 khong gui dot moi */
+            HAL_I2C_Master_Abort_IT(&hi2c3, (uint16_t)(mt[tx_idx].i2c_addr << 1));
+            tx_idx = -1;
+        }
+        if (i2c_need_recover && tx_idx < 0) {
+            i2c_bus_recover();
+            i2c_need_recover = 0;
+        }
+    }
+
     for (int i = 0; i < MOT_COUNT; i++) {
         mot_t *m = &mt[i];
         uint8_t e = m->evt;
@@ -402,7 +522,6 @@ void motor_task(void)
         if (e & EVT_REVERSE) printf("\r\n[Banh %s: ENCODER NGUOC CHIEU motor, da ngat. Go 'm %s daoe' roi 'm %s c']\r\n> ", m->name, m->name, m->name);
         if (e & EVT_TIMEOUT) printf("\r\n[Banh %s: het gio, da dung]\r\n> ", m->name);
     }
-    if (!any_active()) stby(0);
 }
 
 /* ------------------------------------------------------------------ */
@@ -425,13 +544,16 @@ static const char *mode_str(mot_mode_t md)
 
 static void show_all(void)
 {
-    printf("Banh | che do  | PWM %%  | toc do RPM | vi tri do | xung     | loi\r\n");
+    printf("Banh | module | che do  | PWM %%  | toc do RPM | vi tri do | xung     | loi\r\n");
     for (int i = 0; i < MOT_COUNT; i++) {
         mot_t *m = &mt[i];
-        printf("  %s | %-7s | ", m->name, mode_str(m->mode));
+        printf("  %s | 0x%02X %c | %-7s | ", m->name, m->i2c_addr, m->chan_b ? 'B' : 'A', mode_str(m->mode));
         pf1(m->duty); printf(" | "); pf1(m->rpm); printf(" | "); pf1(mot_get_deg((mot_id_t)i));
         printf(" | %ld | %s\r\n", (long)m->counts, m->fault ? "KET/NGUOC" : "-");
     }
+    printf("I2C: gui %lu goi | NACK %lu | loi bus %lu | bo qua %lu | phuc hoi %lu\r\n",
+           (unsigned long)n_sent, (unsigned long)n_nack, (unsigned long)n_buserr,
+           (unsigned long)n_skip, (unsigned long)n_recover);
 }
 
 static void show_enc(void)
@@ -456,7 +578,7 @@ static void watch(void)
                 printf("%s ", mt[i].name); pf1(mt[i].rpm); printf(" RPM ");
                 pf1(mot_get_deg((mot_id_t)i)); printf(" do  ");
             }
-            printf("\r\n");
+            printf("| loi I2C %lu\r\n", (unsigned long)(n_nack + n_buserr));
         }
     }
     printf("Thoat theo doi\r\n");
@@ -469,10 +591,65 @@ static void show_pid(void)
     printf(" | kpos "); pf1(kpos); printf("   (don vi %% PWM / RPM)\r\n");
 }
 
+/* Quet bus I2C, in dia chi co tra loi */
+static void i2c_scan(void)
+{
+    mot_stop_all();
+    bus_take();
+    printf("Quet I2C3 dia chi 1..126...\r\n");
+    int n = 0;
+    for (uint8_t a = 1; a <= 126; a++) {
+        if (HAL_I2C_IsDeviceReady(&hi2c3, (uint16_t)(a << 1), 2, 3) == HAL_OK) {
+            uint32_t vin = 0;
+            printf("  0x%02X", a);
+            if (mke_read(a, MKE_CMD_GET_VIN, &vin) == HAL_OK) printf("  Vin %lu mV", (unsigned long)vin);
+            printf("\r\n");
+            n++;
+        }
+    }
+    printf("Tim thay %d thiet bi. Can co 0x%02X (FL, FR) va 0x%02X (RL, RR)\r\n", n, MOT_I2C_ADDR_FRONT, MOT_I2C_ADDR_REAR);
+    bus_give();
+}
+
+static void show_vin(void)
+{
+    bus_take();
+    const uint8_t ad[2] = { MOT_I2C_ADDR_FRONT, MOT_I2C_ADDR_REAR };
+    for (int k = 0; k < 2; k++) {
+        uint32_t v = 0;
+        if (mke_read(ad[k], MKE_CMD_GET_VIN, &v) == HAL_OK)
+            printf("  Module 0x%02X: Vin %lu.%02lu V\r\n", ad[k], (unsigned long)(v / 1000u), (unsigned long)((v % 1000u) / 10u));
+        else printf("  Module 0x%02X: khong tra loi\r\n", ad[k]);
+    }
+    bus_give();
+}
+
+static void set_addr(const char *so, const char *sn)
+{
+    if (!so || !sn) { printf("Vd: m addr 40 41   (doi module 0x40 thanh 0x41, so hex)\r\n"); return; }
+    uint8_t o = (uint8_t)strtoul(so, NULL, 16), n = (uint8_t)strtoul(sn, NULL, 16);
+    if (o < 1 || o > 126 || n < 1 || n > 126) { printf("Dia chi phai trong 01..7E (hex)\r\n"); return; }
+    mot_stop_all();
+    bus_take();
+    if (HAL_I2C_IsDeviceReady(&hi2c3, (uint16_t)(n << 1), 2, 3) == HAL_OK) {
+        printf("Da co thiet bi o 0x%02X, khong doi de tranh trung\r\n", n); bus_give(); return;
+    }
+    HAL_StatusTypeDef s = mke_write(o, MKE_CMD_SET_ADDR, n);
+    uint32_t t = HAL_GetTick(); while ((HAL_GetTick() - t) < 50u) { }
+    int ok = (HAL_I2C_IsDeviceReady(&hi2c3, (uint16_t)(n << 1), 2, 3) == HAL_OK);
+    printf("Doi 0x%02X -> 0x%02X: %s%s\r\n", o, n, (s == HAL_OK) ? "da gui" : "LOI GUI",
+           ok ? ", module da tra loi o dia chi moi" : ". Chua thay o dia chi moi: tat bat lai module roi 'm scan'");
+    bus_give();
+}
+
 void motor_print_help(void)
 {
-    printf("  --- MOTOR BANH (TB6612). <banh> = fl, fr, rl, rr. KE XE LEN khi test ---\r\n");
-    printf("  m                  trang thai 4 banh\r\n");
+    printf("  --- MOTOR BANH (2 module MKE-M18 qua I2C). <banh> = fl, fr, rl, rr. KE XE LEN ---\r\n");
+    printf("  m                  trang thai 4 banh + dem loi I2C\r\n");
+    printf("  m scan             quet I2C, tim 2 module (0x40, 0x41)\r\n");
+    printf("  m addr <cu> <moi>  doi dia chi module, so hex (vd: m addr 40 41). Chi cam 1 module\r\n");
+    printf("  m vin              doc dien ap nguon motor cua 2 module\r\n");
+    printf("  m freq <hz>        dat tan so PWM cua 2 module\r\n");
     printf("  m e                so xung encoder 4 banh (quay tay de kiem tra)\r\n");
     printf("  m w                theo doi toc do / vi tri lien tuc\r\n");
     printf("  m <banh> pwm <%%> [giay]  chay PWM KHONG PID (-100..100), tu dung sau 2 s\r\n");
@@ -497,6 +674,20 @@ void motor_cmd(int argc, char **argv)
     if (!a)                 { show_all(); return; }
     if (!strcmp(a, "e"))    { show_enc(); return; }
     if (!strcmp(a, "w"))    { watch(); return; }
+    if (!strcmp(a, "scan")) { i2c_scan(); return; }
+    if (!strcmp(a, "vin"))  { show_vin(); return; }
+    if (!strcmp(a, "addr")) { set_addr(b, c); return; }
+    if (!strcmp(a, "freq")) {
+        if (!b) { printf("Vd: m freq 20000\r\n"); return; }
+        uint32_t f = (uint32_t)strtoul(b, NULL, 10);
+        bus_take();
+        HAL_StatusTypeDef s1 = mke_write(MOT_I2C_ADDR_FRONT, MKE_CMD_FREQ, f);
+        HAL_StatusTypeDef s2 = mke_write(MOT_I2C_ADDR_REAR,  MKE_CMD_FREQ, f);
+        bus_give();
+        printf("Tan so PWM %lu Hz: module truoc %s, module sau %s\r\n", (unsigned long)f,
+               (s1 == HAL_OK) ? "OK" : "LOI", (s2 == HAL_OK) ? "OK" : "LOI");
+        return;
+    }
     if (!strcmp(a, "x"))    { mot_stop_all(); printf("Da dung ca 4 banh\r\n"); return; }
     if (!strcmp(a, "z"))    { for (int i = 0; i < MOT_COUNT; i++) mot_zero((mot_id_t)i); printf("Vi tri 4 banh = 0\r\n"); return; }
     if (!strcmp(a, "c"))    { for (int i = 0; i < MOT_COUNT; i++) mt[i].fault = 0; printf("Da xoa loi 4 banh\r\n"); return; }
@@ -516,7 +707,8 @@ void motor_cmd(int argc, char **argv)
     mot_t *m = &mt[w];
 
     if (!b) {
-        printf("%s: %s, PWM ", m->name, mode_str(m->mode)); pf1(m->duty); printf(" %%, ");
+        printf("%s (module 0x%02X kenh %c): %s, PWM ", m->name, m->i2c_addr, m->chan_b ? 'B' : 'A', mode_str(m->mode));
+        pf1(m->duty); printf(" %%, ");
         pf1(m->rpm); printf(" RPM, "); pf1(mot_get_deg((mot_id_t)w)); printf(" do, %ld xung, dau motor %+d, dau encoder %+d%s\r\n",
                (long)m->counts, m->dir, m->enc_dir, m->fault ? ", DANG LOI" : "");
         return;
@@ -539,7 +731,6 @@ void motor_cmd(int argc, char **argv)
         __disable_irq();
         m->duty_cmd = p; m->mode = MODE_PWM; m->ms_left = s * 1000u; m->done = 1;
         __enable_irq();
-        stby(1);
         printf("%s: PWM ", m->name); pf1(p); printf(" %% trong %lu s (khong PID)\r\n", (unsigned long)s);
     }
     else if (!strcmp(b, "v")) {

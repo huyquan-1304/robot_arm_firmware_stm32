@@ -12,9 +12,9 @@
  *   Ket qua la toc do / quang duong tai vanh banh, duong = banh lan ve truoc
  *   (dau rieng tung motor da xu ly trong motor.c). */
 
-#define MEC_RADIUS_MM      37.5f     /* banh mecanum 75 mm */
-#define MEC_LX_MM          85.0f     /* nua chieu dai co so: tam xe toi truc banh truoc/sau */
-#define MEC_LY_MM          144.0f    /* nua vet banh: tam xe toi mat phang banh trai/phai */
+#define MEC_RADIUS_MM      40.0f     /* banh mecanum 80 mm (truoc la 75 mm) */
+#define MEC_LX_MM          85.0f     /* nua chieu dai co so: tam xe toi truc banh truoc/sau. DO LAI khi doi banh */
+#define MEC_LY_MM          144.0f    /* nua vet banh: tam xe toi mat phang GIUA banh trai/phai. DO LAI khi doi banh */
 
 /* Chay theo quang duong / goc (4 banh bat dau va toi noi cung luc) */
 #define MEC_MOVE_RPM       25.0f     /* toc do banh chay nhieu nhat, RPM (~98 mm/s tai vanh) */
