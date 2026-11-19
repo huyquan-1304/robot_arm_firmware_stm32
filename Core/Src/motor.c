@@ -11,7 +11,7 @@ extern I2C_HandleTypeDef hi2c3;   /* 2 module MKE-M18 */
 extern TIM_HandleTypeDef htim2;   /* encoder FL (32 bit) */
 extern TIM_HandleTypeDef htim4;   /* encoder FR (16 bit) */
 extern TIM_HandleTypeDef htim5;   /* encoder RR (32 bit) */
-extern TIM_HandleTypeDef htim8;   /* encoder RL (16 bit) */
+extern TIM_HandleTypeDef htim1;   /* encoder RL (16 bit), PC0/PC1 */
 extern TIM_HandleTypeDef htim6;   /* nhip PID 200 Hz */
 
 #define DT_S        0.005f        /* chu ky ngat TIM6 */
@@ -83,10 +83,10 @@ typedef struct {
 } mot_t;
 
 static mot_t mt[MOT_COUNT] = {
-    { "FL", MOT_I2C_ADDR_FRONT, 0, &htim2, 1, MOT_DIR_FL, MOT_ENC_FL },
-    { "FR", MOT_I2C_ADDR_FRONT, 1, &htim4, 0, MOT_DIR_FR, MOT_ENC_FR },
-    { "RL", MOT_I2C_ADDR_REAR,  0, &htim8, 0, MOT_DIR_RL, MOT_ENC_RL },
-    { "RR", MOT_I2C_ADDR_REAR,  1, &htim5, 1, MOT_DIR_RR, MOT_ENC_RR },
+    { "FL", MOT_I2C_ADDR_LEFT,  0, &htim2, 1, MOT_DIR_FL, MOT_ENC_FL },   /* module TRAI 0x40, kenh A */
+    { "FR", MOT_I2C_ADDR_RIGHT, 0, &htim4, 0, MOT_DIR_FR, MOT_ENC_FR },   /* module PHAI 0x41, kenh A */
+    { "RL", MOT_I2C_ADDR_LEFT,  1, &htim1, 0, MOT_DIR_RL, MOT_ENC_RL },   /* module TRAI 0x40, kenh B */
+    { "RR", MOT_I2C_ADDR_RIGHT, 1, &htim5, 1, MOT_DIR_RR, MOT_ENC_RR },   /* module PHAI 0x41, kenh B */
 };
 
 static float kff  = MOT_KFF_DEFAULT;
@@ -378,7 +378,7 @@ static void enc_pullups(void)
     static const struct { GPIO_TypeDef *port; uint8_t pin; } enc_pins[] = {
         { GPIOA, 0 }, { GPIOA, 1 },     /* TIM2 FL */
         { GPIOD, 12 }, { GPIOD, 13 },   /* TIM4 FR */
-        { GPIOC, 6 }, { GPIOC, 7 },     /* TIM8 RL */
+        { GPIOC, 0 }, { GPIOC, 1 },     /* TIM1 RL */
         { GPIOB, 2 }, { GPIOC, 12 },    /* TIM5 RR */
     };
     for (unsigned i = 0; i < sizeof(enc_pins) / sizeof(enc_pins[0]); i++) {
@@ -399,10 +399,10 @@ void motor_init(void)
         go_off(m);
     }
     /* Dung ca 2 module ngay khi khoi dong */
-    (void)mke_write(MOT_I2C_ADDR_FRONT, MKE_CMD_A_STOP, 0u);
-    (void)mke_write(MOT_I2C_ADDR_FRONT, MKE_CMD_B_STOP, 0u);
-    (void)mke_write(MOT_I2C_ADDR_REAR,  MKE_CMD_A_STOP, 0u);
-    (void)mke_write(MOT_I2C_ADDR_REAR,  MKE_CMD_B_STOP, 0u);
+    (void)mke_write(MOT_I2C_ADDR_LEFT, MKE_CMD_A_STOP, 0u);
+    (void)mke_write(MOT_I2C_ADDR_LEFT, MKE_CMD_B_STOP, 0u);
+    (void)mke_write(MOT_I2C_ADDR_RIGHT, MKE_CMD_A_STOP, 0u);
+    (void)mke_write(MOT_I2C_ADDR_RIGHT, MKE_CMD_B_STOP, 0u);
     started = 1;
     HAL_TIM_Base_Start_IT(&htim6);
 }
@@ -607,14 +607,14 @@ static void i2c_scan(void)
             n++;
         }
     }
-    printf("Tim thay %d thiet bi. Can co 0x%02X (FL, FR) va 0x%02X (RL, RR)\r\n", n, MOT_I2C_ADDR_FRONT, MOT_I2C_ADDR_REAR);
+    printf("Tim thay %d thiet bi. Can co 0x%02X (TRAI: FL, RL) va 0x%02X (PHAI: FR, RR)\r\n", n, MOT_I2C_ADDR_LEFT, MOT_I2C_ADDR_RIGHT);
     bus_give();
 }
 
 static void show_vin(void)
 {
     bus_take();
-    const uint8_t ad[2] = { MOT_I2C_ADDR_FRONT, MOT_I2C_ADDR_REAR };
+    const uint8_t ad[2] = { MOT_I2C_ADDR_LEFT, MOT_I2C_ADDR_RIGHT };
     for (int k = 0; k < 2; k++) {
         uint32_t v = 0;
         if (mke_read(ad[k], MKE_CMD_GET_VIN, &v) == HAL_OK)
@@ -646,7 +646,7 @@ void motor_print_help(void)
 {
     printf("  --- MOTOR BANH (2 module MKE-M18 qua I2C). <banh> = fl, fr, rl, rr. KE XE LEN ---\r\n");
     printf("  m                  trang thai 4 banh + dem loi I2C\r\n");
-    printf("  m scan             quet I2C, tim 2 module (0x40, 0x41)\r\n");
+    printf("  m scan             quet I2C, tim 2 module (0x40 trai, 0x41 phai)\r\n");
     printf("  m addr <cu> <moi>  doi dia chi module, so hex (vd: m addr 40 41). Chi cam 1 module\r\n");
     printf("  m vin              doc dien ap nguon motor cua 2 module\r\n");
     printf("  m freq <hz>        dat tan so PWM cua 2 module\r\n");
@@ -681,10 +681,10 @@ void motor_cmd(int argc, char **argv)
         if (!b) { printf("Vd: m freq 20000\r\n"); return; }
         uint32_t f = (uint32_t)strtoul(b, NULL, 10);
         bus_take();
-        HAL_StatusTypeDef s1 = mke_write(MOT_I2C_ADDR_FRONT, MKE_CMD_FREQ, f);
-        HAL_StatusTypeDef s2 = mke_write(MOT_I2C_ADDR_REAR,  MKE_CMD_FREQ, f);
+        HAL_StatusTypeDef s1 = mke_write(MOT_I2C_ADDR_LEFT, MKE_CMD_FREQ, f);
+        HAL_StatusTypeDef s2 = mke_write(MOT_I2C_ADDR_RIGHT, MKE_CMD_FREQ, f);
         bus_give();
-        printf("Tan so PWM %lu Hz: module truoc %s, module sau %s\r\n", (unsigned long)f,
+        printf("Tan so PWM %lu Hz: module trai %s, module phai %s\r\n", (unsigned long)f,
                (s1 == HAL_OK) ? "OK" : "LOI", (s2 == HAL_OK) ? "OK" : "LOI");
         return;
     }

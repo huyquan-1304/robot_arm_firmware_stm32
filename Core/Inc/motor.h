@@ -6,9 +6,9 @@
 /* 4 MOTOR BANH XE: JGB37-520 12 V 168:1 co encoder Hall, 2 module MKE-M18 (BD62130, I2C).
  *
  *   Driver  : I2C3 (PC8 SCL, PC9 SDA), 100 kHz, che do ngat
- *             module truoc 0x40: kenh A = FL, kenh B = FR
- *             module sau   0x41: kenh A = RL, kenh B = RR
- *   Encoder : TIM2 FL (PA0/PA1), TIM4 FR (PD12/PD13), TIM8 RL (PC6/PC7), TIM5 RR (PB2/PC12)
+ *             module TRAI 0x40: kenh A = FL, kenh B = RL
+ *             module PHAI 0x41: kenh A = FR, kenh B = RR
+ *   Encoder : TIM2 FL (PA0/PA1), TIM4 FR (PD12/PD13), TIM1 RL (PC0/PC1), TIM5 RR (PB2/PC12)
  *   PID     : ngat TIM6, 200 Hz (5 ms). Gui lenh I2C 100 Hz (moi 2 chu ky PID)
  *
  * QUY UOC: so duong = banh lan VE TRUOC cho ca 4 banh. Dau rieng cua tung motor / encoder
@@ -20,8 +20,8 @@
 typedef enum { MOT_FL = 0, MOT_FR, MOT_RL, MOT_RR, MOT_COUNT } mot_id_t;
 
 /* Dia chi I2C 2 module (dat bang lenh "m addr <cu> <moi>", mac dinh xuat xuong 0x40) */
-#define MOT_I2C_ADDR_FRONT   0x40u    /* FL (kenh A), FR (kenh B) */
-#define MOT_I2C_ADDR_REAR    0x41u    /* RL (kenh A), RR (kenh B) */
+#define MOT_I2C_ADDR_LEFT    0x40u    /* module TRAI: FL (kenh A), RL (kenh B) */
+#define MOT_I2C_ADDR_RIGHT   0x41u    /* module PHAI: FR (kenh A), RR (kenh B) */
 #define MOT_CMD_HOLD_MS      100u     /* module tu dung neu khong nhan lenh moi trong thoi gian nay */
 
 /* Thong so co khi */
