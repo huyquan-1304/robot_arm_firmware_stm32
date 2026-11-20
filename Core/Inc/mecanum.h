@@ -3,7 +3,7 @@
 
 #include <stdint.h>
 
-/* XE 4 BANH MECANUM tren lop motor.c (TB6612 + encoder), lenh console "xe ...".
+/* XE 4 BANH MECANUM tren lop motor.c (2 module MKE-M18 + encoder), lenh console "xe ...".
  *
  * DONG HOC NGHICH (tai lieu dong hoc cua project, pt 2.20), L = lx + ly:
  *   FL = vx - vy - L*wz      FR = vx + vy + L*wz
@@ -13,12 +13,16 @@
  *   (dau rieng tung motor da xu ly trong motor.c). */
 
 #define MEC_RADIUS_MM      40.0f     /* banh mecanum 80 mm (truoc la 75 mm) */
-#define MEC_LX_MM          85.0f     /* nua chieu dai co so: tam xe toi truc banh truoc/sau. DO LAI khi doi banh */
-#define MEC_LY_MM          144.0f    /* nua vet banh: tam xe toi mat phang GIUA banh trai/phai. DO LAI khi doi banh */
+#define MEC_LX_MM          85.0f     /* nua chieu dai co so: tam xe toi truc banh truoc/sau (giu nguyen voi banh 80 mm) */
+#define MEC_LY_MM          144.0f    /* nua vet banh: tam xe toi mat phang GIUA banh trai/phai (giu nguyen voi banh 80 mm) */
 
 /* Chay theo quang duong / goc (4 banh bat dau va toi noi cung luc) */
-#define MEC_MOVE_RPM       25.0f     /* toc do banh chay nhieu nhat, RPM (~98 mm/s tai vanh) */
-#define MEC_MOVE_ACC       40.0f     /* gia toc banh chay nhieu nhat, RPM/s */
+#define MEC_MOVE_RPM       20.0f     /* toc do banh chay nhieu nhat, RPM (~84 mm/s tai vanh). Toc do vua phai */
+#define MEC_MOVE_ACC       30.0f     /* gia toc banh chay nhieu nhat, RPM/s (tang toc trong ~0.7 s) */
+
+/* Gioi han toc do banh o che do van toc "xe v" (va ROS sau nay): 25 RPM ~105 mm/s.
+ * Lenh lon hon se bi thu nho deu ca 4 banh, giu dung huong chuyen dong */
+#define MEC_VEL_RPM_MAX    25.0f
 #define MEC_DIST_DEFAULT   300       /* mm, khi khong ghi quang duong */
 
 /* He so hieu chinh goc xoay: banh mecanum truot nen xe thuong xoay thieu.

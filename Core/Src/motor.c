@@ -8,9 +8,9 @@
 
 /* Handle do CubeMX tao trong main.c */
 extern I2C_HandleTypeDef hi2c3;   /* 2 module MKE-M18 */
-extern TIM_HandleTypeDef htim2;   /* encoder FL (32 bit) */
+extern TIM_HandleTypeDef htim2;   /* encoder FL (32 bit), PA0/PA1 */
 extern TIM_HandleTypeDef htim4;   /* encoder FR (16 bit) */
-extern TIM_HandleTypeDef htim5;   /* encoder RR (32 bit) */
+extern TIM_HandleTypeDef htim20;  /* encoder RR (16 bit), PE2/PE3 */
 extern TIM_HandleTypeDef htim1;   /* encoder RL (16 bit), PC0/PC1 */
 extern TIM_HandleTypeDef htim6;   /* nhip PID 200 Hz */
 
@@ -86,7 +86,7 @@ static mot_t mt[MOT_COUNT] = {
     { "FL", MOT_I2C_ADDR_LEFT,  0, &htim2, 1, MOT_DIR_FL, MOT_ENC_FL },   /* module TRAI 0x40, kenh A */
     { "FR", MOT_I2C_ADDR_RIGHT, 0, &htim4, 0, MOT_DIR_FR, MOT_ENC_FR },   /* module PHAI 0x41, kenh A */
     { "RL", MOT_I2C_ADDR_LEFT,  1, &htim1, 0, MOT_DIR_RL, MOT_ENC_RL },   /* module TRAI 0x40, kenh B */
-    { "RR", MOT_I2C_ADDR_RIGHT, 1, &htim5, 1, MOT_DIR_RR, MOT_ENC_RR },   /* module PHAI 0x41, kenh B */
+    { "RR", MOT_I2C_ADDR_RIGHT, 1, &htim20, 0, MOT_DIR_RR, MOT_ENC_RR },   /* module PHAI 0x41, kenh B */
 };
 
 static float kff  = MOT_KFF_DEFAULT;
@@ -379,7 +379,7 @@ static void enc_pullups(void)
         { GPIOA, 0 }, { GPIOA, 1 },     /* TIM2 FL */
         { GPIOD, 12 }, { GPIOD, 13 },   /* TIM4 FR */
         { GPIOC, 0 }, { GPIOC, 1 },     /* TIM1 RL */
-        { GPIOB, 2 }, { GPIOC, 12 },    /* TIM5 RR */
+        { GPIOE, 2 }, { GPIOE, 3 },     /* TIM20 RR */
     };
     for (unsigned i = 0; i < sizeof(enc_pins) / sizeof(enc_pins[0]); i++) {
         uint32_t sh = 2u * enc_pins[i].pin;

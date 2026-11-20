@@ -8,7 +8,7 @@
  *   Driver  : I2C3 (PC8 SCL, PC9 SDA), 100 kHz, che do ngat
  *             module TRAI 0x40: kenh A = FL, kenh B = RL
  *             module PHAI 0x41: kenh A = FR, kenh B = RR
- *   Encoder : TIM2 FL (PA0/PA1), TIM4 FR (PD12/PD13), TIM1 RL (PC0/PC1), TIM5 RR (PB2/PC12)
+ *   Encoder : TIM2 FL (PA0/PA1), TIM4 FR (PD12/PD13), TIM1 RL (PC0/PC1), TIM20 RR (PE2/PE3)
  *   PID     : ngat TIM6, 200 Hz (5 ms). Gui lenh I2C 100 Hz (moi 2 chu ky PID)
  *
  * QUY UOC: so duong = banh lan VE TRUOC cho ca 4 banh. Dau rieng cua tung motor / encoder
@@ -31,15 +31,15 @@ typedef enum { MOT_FL = 0, MOT_FR, MOT_RL, MOT_RR, MOT_COUNT } mot_id_t;
 #define MOT_RPM_NOLOAD       60.0f                                   /* toc do khong tai o 12 V */
 #define MOT_RPM_MAX          40.0f                                   /* gioi han lenh (co tai ~46 RPM) */
 
-/* Dau mac dinh (+1 / -1). Doi sau khi test bang "m <banh> pwm 30" va "m <banh>" */
+/* Dau (+1 / -1), da test ca 4 banh. Ben phai lap doi xung guong nen dao ca motor lan encoder */
 #define MOT_DIR_FL   (+1)
-#define MOT_DIR_FR   (+1)
+#define MOT_DIR_FR   (-1)
 #define MOT_DIR_RL   (+1)
-#define MOT_DIR_RR   (+1)
+#define MOT_DIR_RR   (-1)
 #define MOT_ENC_FL   (+1)
-#define MOT_ENC_FR   (+1)
+#define MOT_ENC_FR   (-1)
 #define MOT_ENC_RL   (+1)
-#define MOT_ENC_RR   (+1)
+#define MOT_ENC_RR   (-1)
 
 /* PID toc do mac dinh (don vi: % PWM). Chinh bang lenh "m pid" */
 #define MOT_KFF_DEFAULT      (100.0f / MOT_RPM_NOLOAD)   /* % / RPM: bu truoc theo toc do */

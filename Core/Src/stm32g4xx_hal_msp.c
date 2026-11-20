@@ -327,37 +327,29 @@ void HAL_TIM_Encoder_MspInit(TIM_HandleTypeDef* htim_encoder)
 
     /* USER CODE END TIM4_MspInit 1 */
   }
-  else if(htim_encoder->Instance==TIM5)
+  else if(htim_encoder->Instance==TIM20)
   {
-    /* USER CODE BEGIN TIM5_MspInit 0 */
+    /* USER CODE BEGIN TIM20_MspInit 0 */
 
-    /* USER CODE END TIM5_MspInit 0 */
+    /* USER CODE END TIM20_MspInit 0 */
     /* Peripheral clock enable */
-    __HAL_RCC_TIM5_CLK_ENABLE();
+    __HAL_RCC_TIM20_CLK_ENABLE();
 
-    __HAL_RCC_GPIOB_CLK_ENABLE();
-    __HAL_RCC_GPIOC_CLK_ENABLE();
-    /**TIM5 GPIO Configuration
-    PB2     ------> TIM5_CH1
-    PC12     ------> TIM5_CH2
+    __HAL_RCC_GPIOE_CLK_ENABLE();
+    /**TIM20 GPIO Configuration
+    PE2     ------> TIM20_CH1
+    PE3     ------> TIM20_CH2
     */
-    GPIO_InitStruct.Pin = RR1_Pin;
+    GPIO_InitStruct.Pin = RR1_Pin|RR2_Pin;
     GPIO_InitStruct.Mode = GPIO_MODE_AF_PP;
     GPIO_InitStruct.Pull = GPIO_NOPULL;
     GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
-    GPIO_InitStruct.Alternate = GPIO_AF2_TIM5;
-    HAL_GPIO_Init(RR1_GPIO_Port, &GPIO_InitStruct);
+    GPIO_InitStruct.Alternate = GPIO_AF6_TIM20;
+    HAL_GPIO_Init(GPIOE, &GPIO_InitStruct);
 
-    GPIO_InitStruct.Pin = RR2_Pin;
-    GPIO_InitStruct.Mode = GPIO_MODE_AF_PP;
-    GPIO_InitStruct.Pull = GPIO_NOPULL;
-    GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
-    GPIO_InitStruct.Alternate = GPIO_AF1_TIM5;
-    HAL_GPIO_Init(RR2_GPIO_Port, &GPIO_InitStruct);
+    /* USER CODE BEGIN TIM20_MspInit 1 */
 
-    /* USER CODE BEGIN TIM5_MspInit 1 */
-
-    /* USER CODE END TIM5_MspInit 1 */
+    /* USER CODE END TIM20_MspInit 1 */
   }
 
 }
@@ -487,25 +479,23 @@ void HAL_TIM_Encoder_MspDeInit(TIM_HandleTypeDef* htim_encoder)
 
     /* USER CODE END TIM4_MspDeInit 1 */
   }
-  else if(htim_encoder->Instance==TIM5)
+  else if(htim_encoder->Instance==TIM20)
   {
-    /* USER CODE BEGIN TIM5_MspDeInit 0 */
+    /* USER CODE BEGIN TIM20_MspDeInit 0 */
 
-    /* USER CODE END TIM5_MspDeInit 0 */
+    /* USER CODE END TIM20_MspDeInit 0 */
     /* Peripheral clock disable */
-    __HAL_RCC_TIM5_CLK_DISABLE();
+    __HAL_RCC_TIM20_CLK_DISABLE();
 
-    /**TIM5 GPIO Configuration
-    PB2     ------> TIM5_CH1
-    PC12     ------> TIM5_CH2
+    /**TIM20 GPIO Configuration
+    PE2     ------> TIM20_CH1
+    PE3     ------> TIM20_CH2
     */
-    HAL_GPIO_DeInit(RR1_GPIO_Port, RR1_Pin);
+    HAL_GPIO_DeInit(GPIOE, RR1_Pin|RR2_Pin);
 
-    HAL_GPIO_DeInit(RR2_GPIO_Port, RR2_Pin);
+    /* USER CODE BEGIN TIM20_MspDeInit 1 */
 
-    /* USER CODE BEGIN TIM5_MspDeInit 1 */
-
-    /* USER CODE END TIM5_MspDeInit 1 */
+    /* USER CODE END TIM20_MspDeInit 1 */
   }
 
 }

@@ -9,7 +9,7 @@
 
 #define MEC_PI           3.14159265f
 #define MEC_L_MM         (MEC_LX_MM + MEC_LY_MM)                   /* 229 mm */
-#define MEC_CIRC_MM      (2.0f * MEC_PI * MEC_RADIUS_MM)           /* 235.6 mm / vong */
+#define MEC_CIRC_MM      (2.0f * MEC_PI * MEC_RADIUS_MM)           /* 251.3 mm / vong (banh 80 mm) */
 #define DEG_PER_MM       (360.0f / MEC_CIRC_MM)                    /* do banh / mm vanh */
 #define RPM_PER_MMS      (60.0f / MEC_CIRC_MM)                     /* RPM / (mm/s) */
 
@@ -64,7 +64,7 @@ void mecanum_set_velocity(float vx, float vy, float wz)
         if (fabs_f(r[i]) > rmax) rmax = fabs_f(r[i]);
     }
     /* Vuot gioi han: thu nho DEU ca 4 banh de giu dung huong chuyen dong */
-    float k = (rmax > MOT_RPM_MAX) ? MOT_RPM_MAX / rmax : 1.0f;
+    float k = (rmax > MEC_VEL_RPM_MAX) ? MEC_VEL_RPM_MAX / rmax : 1.0f;
     for (int i = 0; i < 4; i++) mot_set_rpm((mot_id_t)i, r[i] * k);
 }
 
