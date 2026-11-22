@@ -71,6 +71,8 @@ float mot_get_deg(mot_id_t m);                         /* vi tri banh, do */
 int32_t mot_get_counts(mot_id_t m);
 void  mot_zero(mot_id_t m);
 int   mot_fault(mot_id_t m);                           /* 1 = da ngat do ket truc */
+void  mot_clear_fault(mot_id_t m);                     /* xoa loi ket truc / nguoc encoder (nhu lenh "m <banh> c") */
+uint32_t mot_i2c_errors(void);                         /* tong so loi I2C (NACK + loi bus) tu luc khoi dong */
 const char *mot_name(mot_id_t m);
 
 #endif /* MOTOR_H */

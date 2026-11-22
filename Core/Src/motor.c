@@ -486,6 +486,18 @@ float mot_get_deg(mot_id_t id)   { return (id < MOT_COUNT) ? (float)mt[id].count
 int   mot_fault(mot_id_t id)     { return (id < MOT_COUNT) ? mt[id].fault : 0; }
 const char *mot_name(mot_id_t id){ return (id < MOT_COUNT) ? mt[id].name : "?"; }
 
+void mot_clear_fault(mot_id_t id)
+{
+    if (id >= MOT_COUNT) return;
+    __disable_irq();
+    mt[id].fault    = 0;
+    mt[id].stall_ms = 0;
+    mt[id].rev_ms   = 0;
+    __enable_irq();
+}
+
+uint32_t mot_i2c_errors(void) { return n_nack + n_buserr; }
+
 void mot_zero(mot_id_t id)
 {
     if (id >= MOT_COUNT) return;

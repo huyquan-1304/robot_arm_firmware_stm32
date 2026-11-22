@@ -6,6 +6,7 @@
 #include "cmd_uart.h"
 #include "uart_rx.h"
 #include "link.h"
+#include "base_link.h"
 #include "main.h"
 #include <stdio.h>
 #include <string.h>
@@ -67,6 +68,7 @@ static int32_t  get_i32(const uint8_t *p)
 
 /* ===================== TRANG THAI ===================== */
 static uint8_t  active = 0;          /* dang o che do ROS */
+static uint8_t  arm_used = 0;        /* Pi da gui goi tay may (0x01..0x07): moi doc CAN va gui STATE tay */
 static uint8_t  enabled = 0;         /* dang nhan lenh chuyen dong */
 static uint16_t status = ROS_ST_NOT_HOMED;
 static uint16_t last_seq = 0;
@@ -101,6 +103,12 @@ static void send_frame(uint8_t type, const uint8_t *payload, uint8_t len)
     if (len) memcpy(&f[4], payload, len);
     put_u16(&f[4 + len], crc16_ccitt(&f[2], (uint16_t)(2u + len), 0xFFFFu));
     link_ros_write(f, (uint16_t)(6u + len));   /* USB hoac UART, tuy duong Pi dang dung */
+}
+
+void ros_link_send(uint8_t type, const uint8_t *payload, uint8_t len)
+{
+    if (len > MAX_PAYLOAD) return;
+    send_frame(type, payload, len);
 }
 
 static void send_state(uint8_t loop_ms)
@@ -207,7 +215,17 @@ static void handle_frame(uint8_t type, const uint8_t *p, uint8_t len)
         link_ros_bind();                   /* ROS chay tren duong vua nhan goi nay (USB hoac UART) */
         zdt_debug = 0;                     /* khong in frame CAN ra UART nua */
         enabled = 0;
+        arm_used = 0;
         last_cycle_tick = HAL_GetTick();
+        base_link_reset();                 /* xe: dung, TAT, bat dau gui STATE_BASE */
+    }
+
+    /* Goi cua xe 4 banh (0x10..0x12): xu ly o base_link.c, khong dong toi CAN */
+    if (base_link_handle(type, p, len)) return;
+
+    /* Goi dau tien cua tay may: tu day moi doc vi tri 4 khop qua CAN va gui STATE tay */
+    if (!arm_used && type >= T_CMD_JOINT && type <= T_CMD_WRIST) {
+        arm_used = 1;
         can_fail_streak = 0;
         note_can_cycle(read_all_positions());
     }
@@ -225,6 +243,7 @@ static void handle_frame(uint8_t type, const uint8_t *p, uint8_t len)
         if (len == 1 && !homing) on_enable(p[0]);
         break;
     case T_CMD_ESTOP:
+        base_link_estop();                /* dung ca 4 banh */
         stop_motion();
         status |= ROS_ST_ESTOP;
         if (homing) home_abort = 1;
@@ -314,6 +333,7 @@ int ros_link_poll_blocking(void)
     uint8_t b;
     link_task();                                        /* day goi STATE ra USB trong luc home */
     while (link_get_ros(&b)) (void)ros_link_feed(b);    /* PING giu last_rx_tick, ESTOP dat home_abort */
+    base_link_task();                                   /* xe: watchdog va STATE_BASE van chay trong luc home */
     uint32_t now = HAL_GetTick();
     if (now - last_home_state_tick >= 100u) {
         last_home_state_tick = now;
@@ -329,6 +349,7 @@ static void run_home(void)
     home_req   = 0;
     homing     = 1;
     home_abort = 0;
+    base_link_stop();                     /* khong cho xe chay trong luc home tay (khoang 30 s) */
     status &= (uint16_t)~(ROS_ST_ESTOP | ROS_ST_WATCHDOG | ROS_ST_LIMIT);
     last_home_state_tick = HAL_GetTick();
     send_state(0);
@@ -353,10 +374,18 @@ void ros_link_task(void)
     /* Pi im lang qua lau: tro lai console */
     if (now - last_rx_tick > ROS_MODE_TIMEOUT_MS) {
         if (enabled) stop_motion();
+        base_link_stop();                 /* dung ca 4 banh */
         active = 0;
+        arm_used = 0;
         printf("\r\n[Thoat che do ROS: %lu ms khong nhan goi]\r\n> ", (unsigned long)ROS_MODE_TIMEOUT_MS);
         return;
     }
+
+    /* Xe 4 banh: watchdog va STATE_BASE 50 Hz. Chay truoc phan tay may */
+    base_link_task();
+
+    /* Chua dung tay may: khong doc CAN (doc 4 khop chua cap nguon mat 4 x 50 ms moi chu ky) */
+    if (!arm_used) return;
 
     /* Watchdog: dang chay ma khong con lenh */
     if (enabled && now - last_cmd_tick > ROS_WATCHDOG_MS) {

@@ -37,6 +37,11 @@
  * TRA LOI STM32 -> Pi (moi chu ky 20 ms khi o che do ROS)
  *   0x81 STATE        seq u16 | goc thuc 4 x i32 (0.1 do) | servo_us u16 | status u16 | loop_ms u8
  *                     = 23 byte. seq = seq cua CMD_JOINT gan nhat.
+ *                     CHI gui sau khi Pi da gui it nhat 1 goi cua tay may (0x01..0x07).
+ *
+ * XE 4 BANH: goi 0x10..0x12 va STATE_BASE 0x90, xem base_link.h.
+ *   Node chi chay xe khong gui goi tay may, nen STM32 khong doc CAN (test xe khi tay may chua cap nguon).
+ *   CMD_ESTOP dung ca tay may lan 4 banh.
  */
 
 /* Bit cua truong status */
@@ -62,6 +67,9 @@ void    ros_link_task(void);
 
 /* 1 = dang o che do ROS, console khong duoc printf */
 uint8_t ros_link_active(void);
+
+/* Gui 1 goi nhi phan ra duong ROS (dung cho base_link.c) */
+void    ros_link_send(uint8_t type, const uint8_t *payload, uint8_t len);
 
 /* Goi lien tuc trong luc home do Pi yeu cau (qua ham huy cua home.c): nhan va xu ly goi tu Pi,
  * gui STATE moi 100 ms. Tra ve 1 neu Pi gui CMD_ESTOP (huy home). */
